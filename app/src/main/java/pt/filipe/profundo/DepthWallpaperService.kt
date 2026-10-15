@@ -49,6 +49,8 @@ class DepthWallpaperService : WallpaperService() {
         private var bg: Bitmap? = null
         private var fg: Bitmap? = null
         private var clip: VideoClip? = null
+        private var inf: InfinityConfig? = null      // != null → modo túnel
+        private val animStart = SystemClock.uptimeMillis()
         private var frameIndex = 0
         @Volatile private var locked = true
 
@@ -71,6 +73,16 @@ class DepthWallpaperService : WallpaperService() {
         }
 
         private val drawRunnable = Runnable { drawFrame() }
+
+        // Túnel: ~60 fps só enquanto visível
+        private val tunnelLoop = object : Runnable {
+            override fun run() {
+                if (inf == null || !isVisible) return
+                val start = SystemClock.uptimeMillis()
+                drawFrame()
+                render.postAtTime(this, start + 16)
+            }
+        }
 
         private val videoLoop = object : Runnable {
             override fun run() {
@@ -123,6 +135,7 @@ class DepthWallpaperService : WallpaperService() {
         override fun onSurfaceDestroyed(holder: SurfaceHolder) {
             render.post {
                 render.removeCallbacks(videoLoop)
+                render.removeCallbacks(tunnelLoop)
                 stopSensor()
             }
             super.onSurfaceDestroyed(holder)
@@ -149,13 +162,20 @@ class DepthWallpaperService : WallpaperService() {
             ensureLoaded()
             updateSensor()
             render.removeCallbacks(videoLoop)
+            render.removeCallbacks(tunnelLoop)
             if (!visible) return
-            if (clip != null) render.post(videoLoop) else drawFrame()
+            when {
+                inf != null -> render.post(tunnelLoop)
+                clip != null -> render.post(videoLoop)
+                else -> drawFrame()
+            }
         }
 
         private fun restartLoopIfNeeded() {
             render.removeCallbacks(videoLoop)
-            if (isVisible && clip != null) render.post(videoLoop)
+            render.removeCallbacks(tunnelLoop)
+            if (!isVisible) return
+            if (inf != null) render.post(tunnelLoop) else if (clip != null) render.post(videoLoop)
         }
 
         private fun ensureLoaded() {
@@ -165,8 +185,10 @@ class DepthWallpaperService : WallpaperService() {
             mode = Store.mode(prefs)
             cfg = ClockConfig.load(prefs)
             clip?.release(); clip = null
-            bg = null; fg = null
-            if (mode == Store.MODE_VIDEO) {
+            bg = null; fg = null; inf = null
+            if (mode == Store.MODE_INFINITY) {
+                inf = InfinityConfig.load(prefs)
+            } else if (mode == Store.MODE_VIDEO) {
                 clip = VideoClip.open(Store.videoDir(ctx))
                 frameIndex = 0
             } else {
@@ -180,6 +202,17 @@ class DepthWallpaperService : WallpaperService() {
             val holder = surfaceHolder ?: return
             val canvas = try { holder.lockHardwareCanvas() } catch (_: Exception) { null } ?: return
             try {
+                val tunnel = inf
+                if (tunnel != null) {
+                    InfinityRenderer.draw(
+                        canvas, tunnel, cfg, showClock = locked || cfg.showOnHome,
+                        now = Date(), is24 = DateFormat.is24HourFormat(ctx),
+                        tiltX = tiltX, tiltY = tiltY,
+                        timeSec = (SystemClock.uptimeMillis() - animStart) / 1000f
+                    )
+                    drawnX = tiltX; drawnY = tiltY
+                    return
+                }
                 val c = clip
                 DepthRenderer.draw(
                     canvas,
@@ -227,7 +260,7 @@ class DepthWallpaperService : WallpaperService() {
             tiltX += (targetX - tiltX) * 0.2f
             tiltY += (targetY - tiltY) * 0.2f
             // No vídeo o loop já redesenha a cada frame
-            if (clip == null && (abs(tiltX - drawnX) > 0.01f || abs(tiltY - drawnY) > 0.01f)) drawFrame()
+            if (clip == null && inf == null && (abs(tiltX - drawnX) > 0.01f || abs(tiltY - drawnY) > 0.01f)) drawFrame()
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}

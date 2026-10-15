@@ -54,6 +54,7 @@ object Store {
     fun videoNewDir(c: Context) = File(c.filesDir, "video_new")
     const val MODE_PHOTO = "photo"
     const val MODE_VIDEO = "video"
+    const val MODE_INFINITY = "infinity"
     fun mode(p: SharedPreferences): String = p.getString("mode", MODE_PHOTO) ?: MODE_PHOTO
 }
 

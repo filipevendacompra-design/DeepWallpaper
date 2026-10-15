@@ -105,6 +105,10 @@ class MainActivity : ComponentActivity() {
                 if (!busy) pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
             }
         })
+        root.addView(Button(this).apply {
+            text = "Túnel infinito →"
+            setOnClickListener { startActivity(Intent(this@MainActivity, InfinityActivity::class.java)) }
+        })
         status = label("Escolhe uma foto com um sujeito bem destacado (pessoa, animal, objeto).")
         root.addView(status)
 

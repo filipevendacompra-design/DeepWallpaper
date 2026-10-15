@@ -14,6 +14,10 @@ e desenha o relógio **entre o fundo e o sujeito** — o efeito de profundidade 
 - Cada frame é recortado uma vez ao importar; a máscara é suavizada no tempo para não tremer
 - No bloqueio só reproduz: frame → relógio → frame cortado pela máscara
 
+## Túnel infinito
+- Simulação de espelho infinito: forma, LEDs, cor, profundidade, LEDs a correr
+- Relógio "afundado" dentro do túnel; inclinação move o ponto de fuga
+
 ## Preparar o Samsung
 1. Good Lock → LockStar → relógio personalizado só com espaços (esconde o relógio da Samsung).
 2. Abre o Profundo → escolhe foto → **Aplicar como fundo** → aplica ao bloqueio e ao inicial.
