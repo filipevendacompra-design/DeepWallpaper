@@ -20,9 +20,43 @@ import android.text.format.DateFormat
 import android.view.SurfaceHolder
 import androidx.core.content.ContextCompat
 import java.util.Date
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sin
+
+/**
+ * Imagens da foto partilhadas por todas as instâncias do fundo no processo
+ * (bloqueio, ecrã inicial, pré-visualizações do sistema) — uma cópia em memória em vez de várias.
+ */
+object PhotoCache {
+    class Content(val version: Long, val bg: Bitmap?, val fg: Bitmap?, val fill: Bitmap?, val depth: FloatArray?, val dw: Int, val dh: Int)
+
+    private var current: Content? = null
+
+    @Synchronized
+    fun get(ctx: Context, version: Long): Content {
+        current?.let { if (it.version == version) return it }
+        current = null   // larga a anterior antes de carregar a nova (o GC liberta-a quando ninguém a usar)
+        val c = try {
+            val bg = Store.bgFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
+            val fg = Store.fgFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
+            val depthBmp = Store.depthFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
+            // Com profundidade não é preciso o fundo preenchido — poupa memória
+            val fill = if (depthBmp == null)
+                Store.bgFillFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) } else null
+            val depth = depthBmp?.let { DepthEstimator.fromBitmap(it) }
+            val c = Content(version, bg, fg, fill, depth, depthBmp?.width ?: 0, depthBmp?.height ?: 0)
+            depthBmp?.recycle()
+            c
+        } catch (_: Throwable) {   // inclui OutOfMemoryError: mais vale um fundo preto do que travar o sistema
+            Content(version, null, null, null, null, 0, 0)
+        }
+        current = c
+        return c
+    }
+}
 
 class DepthWallpaperService : WallpaperService() {
 
@@ -56,6 +90,7 @@ class DepthWallpaperService : WallpaperService() {
         private var frameIndex = 0
         private val start = SystemClock.uptimeMillis()
         @Volatile private var locked = true
+        @Volatile private var surfaceOk = false
 
         // Paralaxe
         private val sensors = getSystemService(SensorManager::class.java)
@@ -139,8 +174,20 @@ class DepthWallpaperService : WallpaperService() {
             requestDraw()
         }
 
+        override fun onSurfaceCreated(holder: SurfaceHolder) {
+            super.onSurfaceCreated(holder)
+            surfaceOk = true
+        }
+
+        /**
+         * O Android exige que deixemos de desenhar ANTES de devolver o ecrã.
+         * Como todo o desenho corre na thread de render, esperamos que ela confirme que parou.
+         */
         override fun onSurfaceDestroyed(holder: SurfaceHolder) {
-            render.post { stopLoops(); stopSensor() }
+            surfaceOk = false
+            val done = CountDownLatch(1)
+            render.post { stopLoops(); stopSensor(); done.countDown() }
+            try { done.await(800, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) {}
             super.onSurfaceDestroyed(holder)
         }
 
@@ -193,20 +240,19 @@ class DepthWallpaperService : WallpaperService() {
             clip?.release(); clip = null
             bg = null; fg = null; bgFill = null; depth = null
             if (mode == Store.MODE_VIDEO) {
-                clip = VideoClip.open(Store.videoDir(ctx))
+                clip = try { VideoClip.open(Store.videoDir(ctx)) } catch (_: Throwable) { null }
                 frameIndex = 0
             } else {
-                bg = Store.bgFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
-                fg = Store.fgFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
-                bgFill = Store.bgFillFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
+                val content = PhotoCache.get(ctx, version)
+                bg = content.bg; fg = content.fg; bgFill = content.fill
                 depth = try {
-                    Store.depthFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
-                        ?.let { db -> DepthMesh.forPhoto(DepthEstimator.fromBitmap(db), db.width, db.height, fg) }
+                    content.depth?.let { DepthMesh.forPhoto(it, content.dw, content.dh, fg) }
                 } catch (_: Throwable) { null }
             }
         }
 
         private fun drawFrame() {
+            if (!surfaceOk) return
             ensureLoaded()
             val holder = surfaceHolder ?: return
             val canvas = try { holder.lockHardwareCanvas() } catch (_: Exception) { null } ?: return
