@@ -19,6 +19,23 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.10.2
+      - name: Cache do modelo de profundidade
+        uses: actions/cache@v4
+        with:
+          path: model-cache
+          key: depth-anything-v2-small-qaihub-v0.63.0
+      - name: Modelo de profundidade (Depth Anything V2 Small, Qualcomm AI Hub, MIT)
+        run: |
+          mkdir -p model-cache app/src/main/assets
+          if [ ! -f model-cache/depth.tflite ]; then
+            curl -L --fail -o /tmp/m.zip https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-models/models/depth_anything_v2/releases/v0.63.0/depth_anything_v2-tflite-float.zip
+            mkdir -p /tmp/m && unzip -o -q /tmp/m.zip -d /tmp/m
+            f=$(find /tmp/m -name '*.tflite' | head -1)
+            echo "Modelo: $f"; ls -la "$f"
+            cp "$f" model-cache/depth.tflite
+          fi
+          cp model-cache/depth.tflite app/src/main/assets/depth.tflite
+          ls -la app/src/main/assets
       - name: Build debug APK
         run: gradle :app:assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4

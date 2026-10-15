@@ -49,6 +49,7 @@ class DepthWallpaperService : WallpaperService() {
         private var bg: Bitmap? = null
         private var fg: Bitmap? = null
         private var bgFill: Bitmap? = null
+        private var depth: DepthMesh? = null
         private var clip: VideoClip? = null
         private var frameIndex = 0
         @Volatile private var locked = true
@@ -166,7 +167,7 @@ class DepthWallpaperService : WallpaperService() {
             mode = Store.mode(prefs)
             cfg = ClockConfig.load(prefs)
             clip?.release(); clip = null
-            bg = null; fg = null; bgFill = null
+            bg = null; fg = null; bgFill = null; depth = null
             if (mode == Store.MODE_VIDEO) {
                 clip = VideoClip.open(Store.videoDir(ctx))
                 frameIndex = 0
@@ -174,6 +175,10 @@ class DepthWallpaperService : WallpaperService() {
                 bg = Store.bgFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
                 fg = Store.fgFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
                 bgFill = Store.bgFillFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
+                depth = try {
+                    Store.depthFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
+                        ?.let { DepthMesh(it, fg) }
+                } catch (_: Throwable) { null }
             }
         }
 
@@ -193,7 +198,8 @@ class DepthWallpaperService : WallpaperService() {
                     is24 = DateFormat.is24HourFormat(ctx),
                     tiltX = tiltX, tiltY = tiltY,
                     mask = c?.mask,
-                    bgFill = if (c != null) null else bgFill
+                    bgFill = if (c != null) null else bgFill,
+                    depth = if (c != null) null else depth
                 )
                 drawnX = tiltX; drawnY = tiltY
             } finally {

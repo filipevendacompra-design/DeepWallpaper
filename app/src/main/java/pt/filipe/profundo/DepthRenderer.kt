@@ -51,6 +51,7 @@ object Store {
     fun bgFile(c: Context) = File(c.filesDir, "bg.jpg")
     fun fgFile(c: Context) = File(c.filesDir, "fg.png")
     fun bgFillFile(c: Context) = File(c.filesDir, "bg_fill.jpg")   // fundo sem o sujeito (paralaxe em camadas)
+    fun depthFile(c: Context) = File(c.filesDir, "depth.png")       // mapa de profundidade (malha 3D)
     fun videoDir(c: Context) = File(c.filesDir, "video")
     fun videoNewDir(c: Context) = File(c.filesDir, "video_new")
     const val MODE_PHOTO = "photo"
@@ -99,12 +100,23 @@ object DepthRenderer {
         showClock: Boolean, now: Date, is24: Boolean,
         tiltX: Float = 0f, tiltY: Float = 0f,
         mask: Bitmap? = null,  // vídeo: o sujeito é o próprio frame cortado por esta máscara (ALPHA_8)
-        bgFill: Bitmap? = null // fundo sem o sujeito → ativa as 3 camadas
+        bgFill: Bitmap? = null, // fundo sem o sujeito → ativa as 3 camadas
+        depth: DepthMesh? = null // mapa de profundidade → malha 3D (tem prioridade)
     ) {
         val w = c.width
         val h = c.height
         val zoom = zoomFor(cfg)
         val amp = if (cfg.parallax) IMAGE_AMPLITUDE * cfg.intensity * w else 0f
+
+        // ---- Malha 3D: cada ponto mexe-se conforme a sua profundidade ----
+        if (depth != null && cfg.parallax && bg != null && fg != null && mask == null) {
+            depth.update(bg.width, bg.height, w, h, zoom, tiltX * amp, tiltY * amp)
+            c.drawColor(Color.BLACK)
+            c.drawBitmapMesh(bg, DepthMesh.MESH_W, DepthMesh.MESH_H, depth.verts, 0, null, 0, bmpPaint)
+            if (showClock) drawClock(c, cfg, now, is24, withDate = true)   // o relógio está no plano parado
+            c.drawBitmapMesh(fg, DepthMesh.MESH_W, DepthMesh.MESH_H, depth.verts, 0, null, 0, bmpPaint)
+            return
+        }
         val dx = (tiltX * amp).toInt()
         val dy = (tiltY * amp).toInt()
         val ox = (w * (zoom - 1f) / 2f).toInt()

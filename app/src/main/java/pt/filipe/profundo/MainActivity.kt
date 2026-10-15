@@ -375,15 +375,29 @@ class MainActivity : ComponentActivity() {
             } catch (_: Throwable) {
                 Store.bgFillFile(this).delete()   // sem camadas: volta ao movimento em bloco
             }
+            // Profundidade com IA → malha 3D (se falhar, ficam as 3 camadas)
+            runOnUiThread { status.text = "A calcular a profundidade da foto…" }
+            depthMsg = try {
+                val r = DepthEstimator.estimate(this, b)
+                val db = DepthEstimator.toBitmap(r)
+                writeAtomic(Store.depthFile(this)) { db.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                db.recycle()
+                "Profundidade 3D ativa (${r.w}×${r.h}, ${r.ms} ms)."
+            } catch (e: Throwable) {
+                Store.depthFile(this).delete()
+                "Profundidade indisponível (${e.javaClass.simpleName}: ${e.message}). A usar 3 camadas."
+            }
             val p = Store.prefs(this)
             cfg.save(p)
             p.edit().putString("mode", Store.MODE_PHOTO).putLong("version", System.currentTimeMillis()).apply()
             runOnUiThread {
-                status.text = "Guardado."
+                status.text = "Guardado. $depthMsg"
                 openWallpaperPicker()
             }
         }.start()
     }
+
+    private var depthMsg = ""
 
     private fun saveVideoAndApply() {
         status.text = "A guardar…"
@@ -416,7 +430,7 @@ class MainActivity : ComponentActivity() {
     private fun openWallpaperPicker() {
         val current = WallpaperManager.getInstance(this).wallpaperInfo
         if (current?.packageName == packageName) {
-            status.text = "Fundo atualizado."
+            status.text = "Fundo atualizado. $depthMsg"
             return
         }
         val intent = Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER).putExtra(
