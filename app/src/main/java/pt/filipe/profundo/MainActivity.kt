@@ -147,6 +147,13 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(homeBox)
 
+        root.addView(CheckBox(this).apply {
+            text = "Efeito paralaxe (mexe com a inclinação do telemóvel)"
+            setTextColor(Color.rgb(220, 220, 225))
+            isChecked = cfg.parallax
+            setOnCheckedChangeListener { _, c -> cfg = cfg.copy(parallax = c); renderPreview() }
+        })
+
         applyBtn = Button(this).apply {
             text = "Aplicar como fundo"
             isEnabled = false

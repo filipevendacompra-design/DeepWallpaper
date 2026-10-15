@@ -20,11 +20,13 @@ data class ClockConfig(
     val y: Float,          // centro vertical do relógio, fração da altura (0..1)
     val size: Float,       // tamanho do texto, fração da largura
     val color: Int,
-    val showOnHome: Boolean
+    val showOnHome: Boolean,
+    val parallax: Boolean
 ) {
     fun save(p: SharedPreferences) = p.edit()
         .putFloat("y", y).putFloat("size", size)
         .putInt("color", color).putBoolean("home", showOnHome)
+        .putBoolean("parallax", parallax)
         .apply()
 
     companion object {
@@ -32,7 +34,8 @@ data class ClockConfig(
             y = p.getFloat("y", 0.22f),
             size = p.getFloat("size", 0.30f),
             color = p.getInt("color", Color.WHITE),
-            showOnHome = p.getBoolean("home", false)
+            showOnHome = p.getBoolean("home", false),
+            parallax = p.getBoolean("parallax", true)
         )
     }
 }
@@ -61,19 +64,41 @@ object DepthRenderer {
         return Rect(l, t, l + cw, t + ch)
     }
 
+    // Paralaxe: a foto (fundo + sujeito) move-se em bloco e o relógio a outra velocidade.
+    // Fundo e sujeito nunca se separam — o fundo ainda contém o sujeito, separá-los criaria um "fantasma".
+    private const val PARALLAX_ZOOM = 1.06f      // margem extra para as bordas não aparecerem
+    private const val IMAGE_AMPLITUDE = 0.025f   // deslocamento máximo da foto, fração da largura
+    private const val CLOCK_FACTOR = 0.4f        // o relógio move-se 40% do que a foto se move
+
+    /**
+     * tiltX/tiltY: inclinação normalizada (-1..1). 0 = sem paralaxe.
+     */
     fun draw(
         c: Canvas, bg: Bitmap?, fg: Bitmap?, cfg: ClockConfig,
-        showClock: Boolean, now: Date, is24: Boolean
+        showClock: Boolean, now: Date, is24: Boolean,
+        tiltX: Float = 0f, tiltY: Float = 0f
     ) {
         val w = c.width
         val h = c.height
-        val dst = Rect(0, 0, w, h)
+        val zoom = if (cfg.parallax) PARALLAX_ZOOM else 1f
+        val amp = IMAGE_AMPLITUDE * w
+        val dx = (tiltX * amp).toInt()
+        val dy = (tiltY * amp).toInt()
+        val ox = (w * (zoom - 1f) / 2f).toInt()
+        val oy = (h * (zoom - 1f) / 2f).toInt()
+        val dst = Rect(-ox + dx, -oy + dy, w + ox + dx, h + oy + dy)
+
         if (bg != null) {
             c.drawBitmap(bg, srcRectFor(bg.width, bg.height, w, h), dst, bmpPaint)
         } else {
             c.drawColor(Color.BLACK)
         }
-        if (showClock) drawClock(c, cfg, now, is24, withDate = true)
+        if (showClock) {
+            c.save()
+            c.translate(dx * CLOCK_FACTOR, dy * CLOCK_FACTOR)
+            drawClock(c, cfg, now, is24, withDate = true)
+            c.restore()
+        }
         if (fg != null) {
             c.drawBitmap(fg, srcRectFor(fg.width, fg.height, w, h), dst, bmpPaint)
         }

@@ -7,6 +7,7 @@ e desenha o relógio **entre o fundo e o sujeito** — o efeito de profundidade 
 - Recorte automático do sujeito
 - Posição automática do relógio (sujeito tapa ~25% dos dígitos) + ajuste manual
 - Relógio só no ecrã de bloqueio (opção para mostrar também no inicial)
+- Paralaxe com a inclinação: a foto move-se em bloco e o relógio a outra velocidade
 
 ## Preparar o Samsung
 1. Good Lock → LockStar → relógio personalizado só com espaços (esconde o relógio da Samsung).
