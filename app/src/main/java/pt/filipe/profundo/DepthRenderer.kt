@@ -50,11 +50,11 @@ object Store {
     fun prefs(c: Context): SharedPreferences = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     fun bgFile(c: Context) = File(c.filesDir, "bg.jpg")
     fun fgFile(c: Context) = File(c.filesDir, "fg.png")
+    fun bgFillFile(c: Context) = File(c.filesDir, "bg_fill.jpg")   // fundo sem o sujeito (paralaxe em camadas)
     fun videoDir(c: Context) = File(c.filesDir, "video")
     fun videoNewDir(c: Context) = File(c.filesDir, "video_new")
     const val MODE_PHOTO = "photo"
     const val MODE_VIDEO = "video"
-    const val MODE_INFINITY = "infinity"
     fun mode(p: SharedPreferences): String = p.getString("mode", MODE_PHOTO) ?: MODE_PHOTO
 }
 
@@ -78,8 +78,12 @@ object DepthRenderer {
         return Rect(l, t, l + cw, t + ch)
     }
 
-    // Paralaxe: a foto (fundo + sujeito) move-se em bloco e o relógio a outra velocidade.
-    // Fundo e sujeito nunca se separam — o fundo ainda contém o sujeito, separá-los criaria um "fantasma".
+    // Paralaxe em camadas (foto com fundo preenchido): fundo longe, relógio a meio, sujeito perto.
+    // Sem fundo preenchido (vídeo / fotos antigas) a imagem move-se em bloco — o fundo ainda
+    // contém o sujeito e separá-los criaria um "fantasma".
+    private const val LAYER_BG = 0.3f
+    private const val LAYER_CLOCK = 0.6f
+    private const val LAYER_FG = 1.0f
     private const val PARALLAX_ZOOM = 0.06f      // margem extra (por unidade de intensidade) para as bordas não aparecerem
     private const val IMAGE_AMPLITUDE = 0.025f   // deslocamento máximo da foto com intensidade 1, fração da largura
 
@@ -94,7 +98,8 @@ object DepthRenderer {
         c: Canvas, bg: Bitmap?, fg: Bitmap?, cfg: ClockConfig,
         showClock: Boolean, now: Date, is24: Boolean,
         tiltX: Float = 0f, tiltY: Float = 0f,
-        mask: Bitmap? = null   // vídeo: o sujeito é o próprio frame cortado por esta máscara (ALPHA_8)
+        mask: Bitmap? = null,  // vídeo: o sujeito é o próprio frame cortado por esta máscara (ALPHA_8)
+        bgFill: Bitmap? = null // fundo sem o sujeito → ativa as 3 camadas
     ) {
         val w = c.width
         val h = c.height
@@ -106,14 +111,25 @@ object DepthRenderer {
         val oy = (h * (zoom - 1f) / 2f).toInt()
         val dst = Rect(-ox + dx, -oy + dy, w + ox + dx, h + oy + dy)
 
-        if (bg != null) {
-            c.drawBitmap(bg, srcRectFor(bg.width, bg.height, w, h), dst, bmpPaint)
+        val layered = cfg.parallax && bgFill != null && fg != null && mask == null
+        val back = if (layered) bgFill else bg
+        val bgK = if (layered) LAYER_BG else 1f
+        val clockK = if (layered) LAYER_CLOCK else CLOCK_FACTOR
+        val bdx = (dx * bgK).toInt()
+        val bdy = (dy * bgK).toInt()
+        val dstBack = Rect(-ox + bdx, -oy + bdy, w + ox + bdx, h + oy + bdy)
+        val fdx = (dx * (if (layered) LAYER_FG else 1f)).toInt()
+        val fdy = (dy * (if (layered) LAYER_FG else 1f)).toInt()
+        val dstFg = Rect(-ox + fdx, -oy + fdy, w + ox + fdx, h + oy + fdy)
+
+        if (back != null) {
+            c.drawBitmap(back, srcRectFor(back.width, back.height, w, h), dstBack, bmpPaint)
         } else {
             c.drawColor(Color.BLACK)
         }
         if (showClock) {
             c.save()
-            c.translate(dx * CLOCK_FACTOR, dy * CLOCK_FACTOR)
+            c.translate(dx * clockK, dy * clockK)
             drawClock(c, cfg, now, is24, withDate = true)
             c.restore()
         }
@@ -123,7 +139,7 @@ object DepthRenderer {
             c.drawBitmap(mask, srcRectFor(mask.width, mask.height, w, h), dst, maskPaint)
             c.restoreToCount(layer)
         } else if (fg != null) {
-            c.drawBitmap(fg, srcRectFor(fg.width, fg.height, w, h), dst, bmpPaint)
+            c.drawBitmap(fg, srcRectFor(fg.width, fg.height, w, h), dstFg, bmpPaint)
         }
     }
 

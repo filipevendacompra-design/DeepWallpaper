@@ -105,10 +105,6 @@ class MainActivity : ComponentActivity() {
                 if (!busy) pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
             }
         })
-        root.addView(Button(this).apply {
-            text = "Túnel infinito →"
-            setOnClickListener { startActivity(Intent(this@MainActivity, InfinityActivity::class.java)) }
-        })
         status = label("Escolhe uma foto com um sujeito bem destacado (pessoa, animal, objeto).")
         root.addView(status)
 
@@ -370,6 +366,15 @@ class MainActivity : ComponentActivity() {
         Thread {
             writeAtomic(Store.bgFile(this)) { b.compress(Bitmap.CompressFormat.JPEG, 92, it) }
             writeAtomic(Store.fgFile(this)) { f.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            // Fundo sem o sujeito, para a paralaxe em 3 camadas
+            runOnUiThread { status.text = "A preparar as camadas da paralaxe…" }
+            try {
+                val filled = BackgroundFill.fill(b, f)
+                writeAtomic(Store.bgFillFile(this)) { filled.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                filled.recycle()
+            } catch (_: Throwable) {
+                Store.bgFillFile(this).delete()   // sem camadas: volta ao movimento em bloco
+            }
             val p = Store.prefs(this)
             cfg.save(p)
             p.edit().putString("mode", Store.MODE_PHOTO).putLong("version", System.currentTimeMillis()).apply()

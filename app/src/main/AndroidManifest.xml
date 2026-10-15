@@ -22,10 +22,6 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".InfinityActivity"
-            android:exported="false" />
-
         <service
             android:name=".DepthWallpaperService"
             android:exported="true"

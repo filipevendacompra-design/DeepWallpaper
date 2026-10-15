@@ -7,18 +7,14 @@ e desenha o relógio **entre o fundo e o sujeito** — o efeito de profundidade 
 - Recorte automático do sujeito
 - Posição automática do relógio (sujeito tapa ~25% dos dígitos) + ajuste manual
 - Relógio só no ecrã de bloqueio (opção para mostrar também no inicial)
-- Paralaxe com a inclinação: a foto move-se em bloco e o relógio a outra velocidade
+- Paralaxe em 3 camadas: fundo (longe), relógio (meio) e sujeito (perto) a velocidades diferentes;
+  a zona do sujeito no fundo é preenchida com as cores à volta para não aparecer o "fantasma"
+- No vídeo a imagem ainda se move em bloco
 
 ## Vídeo (fase 2)
 - Escolhe um vídeo (usa os primeiros 6 s, até 30 fps)
 - Cada frame é recortado uma vez ao importar; a máscara é suavizada no tempo para não tremer
 - No bloqueio só reproduz: frame → relógio → frame cortado pela máscara
-
-## Túnel infinito
-- Perspetiva real (distância constante entre reflexos) com paredes desenhadas em lote
-- Ambientes: Espelho LED, Tijolo, Poço, Grelha néon, Hiperespaço
-- Forma, LEDs, cor, paredes, tinta do vidro, movimento, LEDs a correr
-- Relógio "afundado" dentro do túnel; inclinação move o ponto de fuga
 
 ## Preparar o Samsung
 1. Good Lock → LockStar → relógio personalizado só com espaços (esconde o relógio da Samsung).
