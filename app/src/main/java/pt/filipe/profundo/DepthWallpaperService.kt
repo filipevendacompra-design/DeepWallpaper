@@ -308,8 +308,9 @@ class DepthWallpaperService : WallpaperService() {
             if (!hasBase) { baseX = rawX; baseY = rawY; hasBase = true }
             baseX += (rawX - baseX) * 0.02f
             baseY += (rawY - baseY) * 0.02f
-            val targetX = ((rawX - baseX) / 0.3f).coerceIn(-1f, 1f)
-            val targetY = ((rawY - baseY) / 0.3f).coerceIn(-1f, 1f)
+            // ~12° de inclinação chegam para o efeito máximo
+            val targetX = ((rawX - baseX) / 0.21f).coerceIn(-1f, 1f)
+            val targetY = ((rawY - baseY) / 0.21f).coerceIn(-1f, 1f)
             tiltX += (targetX - tiltX) * 0.2f
             tiltY += (targetY - tiltY) * 0.2f
             // Com loops ativos (vídeo / movimento automático) o próprio loop redesenha

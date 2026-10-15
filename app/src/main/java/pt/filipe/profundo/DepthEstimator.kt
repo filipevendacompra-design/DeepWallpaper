@@ -10,7 +10,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import kotlin.math.max
+import kotlin.math.abs
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /**
@@ -190,7 +192,8 @@ class DepthMesh {
         val radius = (cfg.smooth.coerceIn(0f, 1f) * 6f).roundToInt()
         val plane = planeFor(cfg)
         val geo = "$bw-$bh-$w-$h-$zoom"
-        val k = "$geo-$radius-$plane-$frameId"
+        val sep = (cfg.separation.coerceIn(0f, 1f) * 20f).roundToInt()
+        val k = "$geo-$radius-$plane-$sep-$frameId"
         if (k != key) {
             val geoChanged = !key.startsWith("$geo-")
             key = k
@@ -210,9 +213,12 @@ class DepthMesh {
             smoothed = DepthEstimator.boxBlur(d, DW, DH, radius)
             // Normaliza para que o maior deslocamento nunca passe a margem de zoom
             val norm = 1f / max(plane, 1f - plane)
+            // Separação de planos: expoente < 1 amplia as diferenças pequenas de profundidade
+            val exp = 1f - 0.65f * (sep / 20f)
             var i = 0
             for (j in 0..MESH_H) for (q in 0..MESH_W) {
-                dv[i] = (sample(q / MESH_W.toFloat(), j / MESH_H.toFloat()) - plane) * norm
+                val v = ((sample(q / MESH_W.toFloat(), j / MESH_H.toFloat()) - plane) * norm).coerceIn(-1f, 1f)
+                dv[i] = if (v >= 0f) abs(v).pow(exp) else -abs(v).pow(exp)
                 i++
             }
         }

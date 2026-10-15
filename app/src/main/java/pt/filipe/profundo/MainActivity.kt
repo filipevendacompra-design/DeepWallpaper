@@ -206,8 +206,12 @@ class MainActivity : ComponentActivity() {
         // ---------- Efeito 3D ----------
         root.addView(section("Efeito 3D"))
         root.addView(check("Profundidade com a inclinação", cfg.parallax) { cfg = cfg.copy(parallax = it); onEffectChanged() })
-        slider(root, "Intensidade", 0, 100, ((cfg.intensity - 0.25f) / 1.75f * 100).roundToInt(), { "$it" }) {
-            cfg = cfg.copy(intensity = 0.25f + it / 100f * 1.75f); onEffectChanged()
+        slider(root, "Intensidade", 0, 100, ((cfg.intensity - 0.25f) / 3.75f * 100).roundToInt(),
+            { "%.1f×".format(0.25f + it / 100f * 3.75f) }) {
+            cfg = cfg.copy(intensity = 0.25f + it / 100f * 3.75f); onEffectChanged()
+        }
+        slider(root, "Separação de planos", 0, 100, (cfg.separation * 100).roundToInt(), { "$it%" }) {
+            cfg = cfg.copy(separation = it / 100f); onEffectChanged()
         }
         root.addView(label("Ponto fixo (o que fica parado)"))
         root.addView(chips(listOf("Relógio", "Sujeito", "Fundo"), { cfg.focus }) { cfg = cfg.copy(focus = it); onEffectChanged() })

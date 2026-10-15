@@ -29,7 +29,7 @@ data class ClockConfig(
     val color: Int = Color.WHITE,
     val showOnHome: Boolean = false,
     val parallax: Boolean = true,
-    val intensity: Float = 1f,     // 0.25..2
+    val intensity: Float = 1f,     // 0.25..4
     // Relógio
     val style: Int = STYLE_HORIZONTAL,
     val font: Int = FONT_MODERN,
@@ -42,7 +42,8 @@ data class ClockConfig(
     val focus: Int = FOCUS_CLOCK,  // que plano fica parado
     val smooth: Float = 0.4f,      // suavidade das bordas 0..1
     val invert: Boolean = false,
-    val autoMotion: Boolean = false
+    val autoMotion: Boolean = false,
+    val separation: Float = 0.5f   // 0..1 — exagera a diferença entre planos próximos
 ) {
     fun save(p: SharedPreferences) = p.edit()
         .putFloat("y", y).putFloat("size", size)
@@ -53,6 +54,7 @@ data class ClockConfig(
         .putFloat("opacity", opacity).putInt("date", dateMode).putBoolean("front", front)
         .putInt("focus", focus).putFloat("smooth", smooth)
         .putBoolean("invert", invert).putBoolean("auto", autoMotion)
+        .putFloat("sep", separation)
         .apply()
 
     companion object {
@@ -91,7 +93,8 @@ data class ClockConfig(
             focus = p.getInt("focus", FOCUS_CLOCK),
             smooth = p.getFloat("smooth", 0.4f),
             invert = p.getBoolean("invert", false),
-            autoMotion = p.getBoolean("auto", false)
+            autoMotion = p.getBoolean("auto", false),
+            separation = p.getFloat("sep", 0.5f)
         )
     }
 }
