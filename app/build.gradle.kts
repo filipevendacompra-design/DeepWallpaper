@@ -15,9 +15,23 @@ android {
         versionName = "0.1"
     }
 
+    // Chave fixa: cada build tem a mesma assinatura, por isso as atualizações instalam por cima
+    signingConfigs {
+        create("fixa") {
+            storeFile = file("profundo.keystore")
+            storePassword = "profundo123"
+            keyAlias = "profundo"
+            keyPassword = "profundo123"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("fixa")
+        }
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("fixa")
         }
     }
     compileOptions {

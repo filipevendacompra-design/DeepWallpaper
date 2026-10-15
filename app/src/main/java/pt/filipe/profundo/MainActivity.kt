@@ -39,6 +39,10 @@ class MainActivity : ComponentActivity() {
     private var bg: Bitmap? = null
     private var fg: Bitmap? = null
     private var fgSmall: Bitmap? = null   // sujeito à escala da pré-visualização (para medir cobertura)
+    private var mask: Bitmap? = null      // vídeo: máscara do 1.º frame (pré-visualização)
+    private var avgMask: Bitmap? = null   // vídeo: máscara média (posição do relógio)
+    private var pendingMode = Store.MODE_PHOTO
+    private var busy = false
     private lateinit var cfg: ClockConfig
 
     private var screenW = 1080
@@ -59,6 +63,10 @@ class MainActivity : ComponentActivity() {
 
     private val pickPhoto = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) importPhoto(uri)
+    }
+
+    private val pickVideo = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) importVideo(uri)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -88,7 +96,13 @@ class MainActivity : ComponentActivity() {
         root.addView(Button(this).apply {
             text = "Escolher foto"
             setOnClickListener {
-                pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                if (!busy) pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            }
+        })
+        root.addView(Button(this).apply {
+            text = "Escolher vídeo (até ${VideoProcessor.MAX_SECONDS.toInt()} s)"
+            setOnClickListener {
+                if (!busy) pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
             }
         })
         status = label("Escolhe uma foto com um sujeito bem destacado (pessoa, animal, objeto).")
@@ -198,6 +212,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadSaved() {
+        if (Store.mode(Store.prefs(this)) == Store.MODE_VIDEO) {
+            if (showVideoPreview(Store.videoDir(this))) {
+                status.text = "Vídeo atual carregado. Ajusta e aplica."
+                return
+            }
+        }
         val bf = Store.bgFile(this); val ff = Store.fgFile(this)
         if (bf.exists() && ff.exists()) {
             bg = BitmapFactory.decodeFile(bf.path)
@@ -226,7 +246,8 @@ class MainActivity : ComponentActivity() {
                         if (cut == null) {
                             status.text = "Não encontrei nenhum sujeito nesta foto. Tenta outra."
                         } else {
-                            bg = bmp; fg = cut
+                            bg = bmp; fg = cut; mask = null; avgMask = null
+                            pendingMode = Store.MODE_PHOTO
                             prepareSmall()
                             autoPosition()
                             applyBtn.isEnabled = true
@@ -238,6 +259,53 @@ class MainActivity : ComponentActivity() {
                     }
             }
         }.start()
+    }
+
+    // ---------- Vídeo ----------
+
+    private fun importVideo(uri: Uri) {
+        busy = true
+        applyBtn.isEnabled = false
+        status.text = "A preparar o vídeo…"
+        val out = Store.videoNewDir(this)
+        Thread {
+            try {
+                val r = VideoProcessor.process(this, uri, out) { done, total ->
+                    runOnUiThread { status.text = "A recortar o sujeito frame a frame… $done/$total" }
+                }
+                runOnUiThread {
+                    busy = false
+                    if (showVideoPreview(r.dir)) {
+                        pendingMode = Store.MODE_VIDEO
+                        autoPosition()
+                        status.text = "Vídeo pronto: ${r.frames} frames a ${r.fps.roundToInt()} fps. " + status.text
+                    } else {
+                        status.text = "O vídeo foi processado mas não consegui abri-lo."
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    busy = false
+                    status.text = "Falhou o vídeo: ${e.message}\n" +
+                        "Se for a primeira vez, o modelo de recorte pode ainda estar a descarregar."
+                }
+            }
+        }.start()
+    }
+
+    /** Pré-visualização com o 1.º frame do clipe. */
+    private fun showVideoPreview(dir: File): Boolean {
+        val clip = VideoClip.open(dir) ?: return false
+        if (!clip.load(0)) { clip.release(); return false }
+        bg = clip.currentFrame
+        mask = clip.mask
+        fg = null
+        avgMask = BitmapFactory.decodeFile(VideoClip.avgFile(dir).path)
+        clip.release()
+        prepareSmall()
+        applyBtn.isEnabled = true
+        renderPreview()
+        return true
     }
 
     private fun decodeLimited(uri: Uri, maxSide: Int): Bitmap {
@@ -252,7 +320,7 @@ class MainActivity : ComponentActivity() {
 
     /** Versão pequena do sujeito, à proporção do ecrã, para medir cobertura rapidamente. */
     private fun prepareSmall() {
-        val f = fg ?: return
+        val f = (if (mask != null) avgMask else fg) ?: return
         val w = 270
         val h = (w * screenH.toFloat() / screenW).toInt()
         fgSmall = DepthRenderer.fgForScreen(f, w, h, DepthRenderer.zoomFor(cfg))
@@ -274,7 +342,7 @@ class MainActivity : ComponentActivity() {
         val h = screenH / 3
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val is24 = DateFormat.is24HourFormat(this)
-        DepthRenderer.draw(Canvas(out), bg, fg, cfg, showClock = true, now = Date(), is24 = is24)
+        DepthRenderer.draw(Canvas(out), bg, fg, cfg, showClock = true, now = Date(), is24 = is24, mask = mask)
         preview.setImageBitmap(out)
         fgSmall?.let {
             val cov = DepthRenderer.coverage(it, cfg, Date(), is24)
@@ -290,6 +358,8 @@ class MainActivity : ComponentActivity() {
     // ---------- Guardar e aplicar ----------
 
     private fun saveAndApply() {
+        if (busy) return
+        if (pendingMode == Store.MODE_VIDEO || (mask != null && fg == null)) { saveVideoAndApply(); return }
         val b = bg ?: return
         val f = fg ?: return
         status.text = "A guardar…"
@@ -298,7 +368,29 @@ class MainActivity : ComponentActivity() {
             writeAtomic(Store.fgFile(this)) { f.compress(Bitmap.CompressFormat.PNG, 100, it) }
             val p = Store.prefs(this)
             cfg.save(p)
-            p.edit().putLong("version", System.currentTimeMillis()).apply()
+            p.edit().putString("mode", Store.MODE_PHOTO).putLong("version", System.currentTimeMillis()).apply()
+            runOnUiThread {
+                status.text = "Guardado."
+                openWallpaperPicker()
+            }
+        }.start()
+    }
+
+    private fun saveVideoAndApply() {
+        status.text = "A guardar…"
+        Thread {
+            val fresh = Store.videoNewDir(this)
+            val live = Store.videoDir(this)
+            if (VideoClip.metaFile(fresh).exists()) {
+                val old = File(filesDir, "video_old")
+                old.deleteRecursively()
+                if (live.exists()) live.renameTo(old)
+                fresh.renameTo(live)
+                old.deleteRecursively()
+            }
+            val p = Store.prefs(this)
+            cfg.save(p)
+            p.edit().putString("mode", Store.MODE_VIDEO).putLong("version", System.currentTimeMillis()).apply()
             runOnUiThread {
                 status.text = "Guardado."
                 openWallpaperPicker()

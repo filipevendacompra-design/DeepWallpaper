@@ -9,6 +9,11 @@ e desenha o relógio **entre o fundo e o sujeito** — o efeito de profundidade 
 - Relógio só no ecrã de bloqueio (opção para mostrar também no inicial)
 - Paralaxe com a inclinação: a foto move-se em bloco e o relógio a outra velocidade
 
+## Vídeo (fase 2)
+- Escolhe um vídeo (usa os primeiros 6 s, até 30 fps)
+- Cada frame é recortado uma vez ao importar; a máscara é suavizada no tempo para não tremer
+- No bloqueio só reproduz: frame → relógio → frame cortado pela máscara
+
 ## Preparar o Samsung
 1. Good Lock → LockStar → relógio personalizado só com espaços (esconde o relógio da Samsung).
 2. Abre o Profundo → escolhe foto → **Aplicar como fundo** → aplica ao bloqueio e ao inicial.

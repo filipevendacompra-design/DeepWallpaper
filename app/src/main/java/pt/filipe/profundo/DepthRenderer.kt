@@ -6,6 +6,8 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.Typeface
 import java.io.File
@@ -48,12 +50,20 @@ object Store {
     fun prefs(c: Context): SharedPreferences = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     fun bgFile(c: Context) = File(c.filesDir, "bg.jpg")
     fun fgFile(c: Context) = File(c.filesDir, "fg.png")
+    fun videoDir(c: Context) = File(c.filesDir, "video")
+    fun videoNewDir(c: Context) = File(c.filesDir, "video_new")
+    const val MODE_PHOTO = "photo"
+    const val MODE_VIDEO = "video"
+    fun mode(p: SharedPreferences): String = p.getString("mode", MODE_PHOTO) ?: MODE_PHOTO
 }
 
 /** Desenha as três camadas: fundo → relógio → sujeito recortado. */
 object DepthRenderer {
 
     private val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+    }
     private val clockTypeface: Typeface = Typeface.create(Typeface.DEFAULT, 700, false)
     private val dateLocale = Locale("pt", "PT")
 
@@ -82,7 +92,8 @@ object DepthRenderer {
     fun draw(
         c: Canvas, bg: Bitmap?, fg: Bitmap?, cfg: ClockConfig,
         showClock: Boolean, now: Date, is24: Boolean,
-        tiltX: Float = 0f, tiltY: Float = 0f
+        tiltX: Float = 0f, tiltY: Float = 0f,
+        mask: Bitmap? = null   // vídeo: o sujeito é o próprio frame cortado por esta máscara (ALPHA_8)
     ) {
         val w = c.width
         val h = c.height
@@ -105,7 +116,12 @@ object DepthRenderer {
             drawClock(c, cfg, now, is24, withDate = true)
             c.restore()
         }
-        if (fg != null) {
+        if (mask != null && bg != null) {
+            val layer = c.saveLayer(null, null)
+            c.drawBitmap(bg, srcRectFor(bg.width, bg.height, w, h), dst, bmpPaint)
+            c.drawBitmap(mask, srcRectFor(mask.width, mask.height, w, h), dst, maskPaint)
+            c.restoreToCount(layer)
+        } else if (fg != null) {
             c.drawBitmap(fg, srcRectFor(fg.width, fg.height, w, h), dst, bmpPaint)
         }
     }
