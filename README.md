@@ -11,8 +11,19 @@ e desenha o relógio **entre o fundo e o sujeito** — o efeito de profundidade 
   a zona do sujeito no fundo é preenchida com as cores à volta para não aparecer o "fantasma"
 - No vídeo a imagem ainda se move em bloco
 
+## Relógio
+- Estilos: horizontal, vertical (horas sobre minutos) e analógico
+- Letras: moderno, fino, condensado, clássico, mono; contorno, sombra, opacidade, data acima/abaixo/oculta
+- 12 cores, tom livre e cor automática tirada da foto
+- Opção "relógio à frente do sujeito" para fotos em que ficaria tapado
+
+## Efeito 3D
+- Profundidade por IA (Depth Anything V2 Small) e malha deformada
+- Ponto fixo (relógio / sujeito / fundo), intensidade, suavidade das bordas, inverter, movimento automático
+
 ## Vídeo (fase 2)
-- Escolhe um vídeo (usa os primeiros 6 s, até 30 fps)
+- Escolhe um vídeo (usa os primeiros 4 s, até 30 fps)
+- Profundidade em 1 de cada 3 frames, interpolada nos restantes
 - Cada frame é recortado uma vez ao importar; a máscara é suavizada no tempo para não tremer
 - No bloqueio só reproduz: frame → relógio → frame cortado pela máscara
 

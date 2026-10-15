@@ -52,4 +52,5 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
     implementation("com.google.ai.edge.litert:litert:1.4.2")
+    implementation("androidx.palette:palette-ktx:1.0.0")
 }

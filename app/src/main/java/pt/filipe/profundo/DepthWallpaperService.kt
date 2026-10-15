@@ -22,15 +22,16 @@ import androidx.core.content.ContextCompat
 import java.util.Date
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.sin
 
 class DepthWallpaperService : WallpaperService() {
 
     override fun onCreateEngine(): Engine = DepthEngine()
 
     /**
-     * Todo o desenho acontece numa única thread de render (renderHandler).
-     * Foto: redesenha quando há motivo (minuto, desbloqueio, inclinação).
-     * Vídeo: loop contínuo à cadência do clipe, só enquanto o fundo está visível.
+     * Todo o desenho acontece numa única thread de render.
+     * Foto: redesenha quando há motivo (minuto, desbloqueio, inclinação) ou em loop se houver movimento automático.
+     * Vídeo: loop à cadência do clipe, só enquanto visível.
      */
     inner class DepthEngine : Engine(), SharedPreferences.OnSharedPreferenceChangeListener,
         SensorEventListener {
@@ -51,7 +52,9 @@ class DepthWallpaperService : WallpaperService() {
         private var bgFill: Bitmap? = null
         private var depth: DepthMesh? = null
         private var clip: VideoClip? = null
+        private val clipMesh = DepthMesh()
         private var frameIndex = 0
+        private val start = SystemClock.uptimeMillis()
         @Volatile private var locked = true
 
         // Paralaxe
@@ -78,13 +81,27 @@ class DepthWallpaperService : WallpaperService() {
             override fun run() {
                 val c = clip ?: return
                 if (!isVisible) return
-                val start = SystemClock.uptimeMillis()
-                if (c.load(frameIndex)) drawFrame()
+                val t0 = SystemClock.uptimeMillis()
+                if (c.load(frameIndex)) {
+                    c.applyDepth(frameIndex, clipMesh)
+                    drawFrame()
+                }
                 frameIndex = (frameIndex + 1) % c.count
-                val period = (1000f / max(1f, c.fps)).toLong()
-                render.postAtTime(this, start + period)
+                render.postAtTime(this, t0 + (1000f / max(1f, c.fps)).toLong())
             }
         }
+
+        /** Foto com movimento automático: ~30 fps só enquanto visível. */
+        private val photoLoop = object : Runnable {
+            override fun run() {
+                if (!isVisible || clip != null || !animatePhoto()) return
+                val t0 = SystemClock.uptimeMillis()
+                drawFrame()
+                render.postAtTime(this, t0 + 33)
+            }
+        }
+
+        private fun animatePhoto() = cfg.parallax && cfg.autoMotion
 
         override fun onCreate(surfaceHolder: SurfaceHolder) {
             super.onCreate(surfaceHolder)
@@ -123,10 +140,7 @@ class DepthWallpaperService : WallpaperService() {
         }
 
         override fun onSurfaceDestroyed(holder: SurfaceHolder) {
-            render.post {
-                render.removeCallbacks(videoLoop)
-                stopSensor()
-            }
+            render.post { stopLoops(); stopSensor() }
             super.onSurfaceDestroyed(holder)
         }
 
@@ -135,7 +149,7 @@ class DepthWallpaperService : WallpaperService() {
                 cfg = ClockConfig.load(prefs)
                 ensureLoaded()
                 updateSensor()
-                restartLoopIfNeeded()
+                restartLoops()
                 if (isVisible) drawFrame()
             }
         }
@@ -147,17 +161,27 @@ class DepthWallpaperService : WallpaperService() {
             render.post(drawRunnable)
         }
 
+        private fun stopLoops() {
+            render.removeCallbacks(videoLoop)
+            render.removeCallbacks(photoLoop)
+        }
+
+        private fun restartLoops() {
+            stopLoops()
+            if (!isVisible) return
+            when {
+                clip != null -> render.post(videoLoop)
+                animatePhoto() -> render.post(photoLoop)
+            }
+        }
+
         private fun onVisibilityRender(visible: Boolean) {
             ensureLoaded()
             updateSensor()
-            render.removeCallbacks(videoLoop)
+            stopLoops()
             if (!visible) return
-            if (clip != null) render.post(videoLoop) else drawFrame()
-        }
-
-        private fun restartLoopIfNeeded() {
-            render.removeCallbacks(videoLoop)
-            if (isVisible && clip != null) render.post(videoLoop)
+            restartLoops()
+            if (clip == null && !animatePhoto()) drawFrame()
         }
 
         private fun ensureLoaded() {
@@ -177,7 +201,7 @@ class DepthWallpaperService : WallpaperService() {
                 bgFill = Store.bgFillFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
                 depth = try {
                     Store.depthFile(ctx).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }
-                        ?.let { DepthMesh(it, fg) }
+                        ?.let { db -> DepthMesh.forPhoto(DepthEstimator.fromBitmap(db), db.width, db.height, fg) }
                 } catch (_: Throwable) { null }
             }
         }
@@ -187,6 +211,13 @@ class DepthWallpaperService : WallpaperService() {
             val holder = surfaceHolder ?: return
             val canvas = try { holder.lockHardwareCanvas() } catch (_: Exception) { null } ?: return
             try {
+                // Movimento automático: um balanço lento somado à inclinação
+                var tx = tiltX; var ty = tiltY
+                if (cfg.parallax && cfg.autoMotion) {
+                    val t = (SystemClock.uptimeMillis() - start) / 1000f
+                    tx += 0.45f * sin(t * 0.55f)
+                    ty += 0.30f * sin(t * 0.37f + 1.3f)
+                }
                 val c = clip
                 DepthRenderer.draw(
                     canvas,
@@ -196,10 +227,10 @@ class DepthWallpaperService : WallpaperService() {
                     showClock = locked || cfg.showOnHome,
                     now = Date(),
                     is24 = DateFormat.is24HourFormat(ctx),
-                    tiltX = tiltX, tiltY = tiltY,
+                    tiltX = tx.coerceIn(-1f, 1f), tiltY = ty.coerceIn(-1f, 1f),
                     mask = c?.mask,
                     bgFill = if (c != null) null else bgFill,
-                    depth = if (c != null) null else depth
+                    depth = if (c != null) (if (c.hasDepth) clipMesh else null) else depth
                 )
                 drawnX = tiltX; drawnY = tiltY
             } finally {
@@ -235,8 +266,9 @@ class DepthWallpaperService : WallpaperService() {
             val targetY = ((rawY - baseY) / 0.3f).coerceIn(-1f, 1f)
             tiltX += (targetX - tiltX) * 0.2f
             tiltY += (targetY - tiltY) * 0.2f
-            // No vídeo o loop já redesenha a cada frame
-            if (clip == null && (abs(tiltX - drawnX) > 0.01f || abs(tiltY - drawnY) > 0.01f)) drawFrame()
+            // Com loops ativos (vídeo / movimento automático) o próprio loop redesenha
+            if (clip == null && !animatePhoto() &&
+                (abs(tiltX - drawnX) > 0.01f || abs(tiltY - drawnY) > 0.01f)) drawFrame()
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}

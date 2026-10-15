@@ -23,13 +23,14 @@ import kotlin.math.roundToInt
  */
 object VideoProcessor {
 
-    const val MAX_SECONDS = 6f
+    const val MAX_SECONDS = 4f
     const val MAX_FPS = 30f
     private const val FRAME_LONG_SIDE = 1600   // resolução dos frames guardados
     private const val MASK_LONG_SIDE = 720     // resolução do recorte (e da máscara)
     private const val TEMPORAL = 0.35f         // peso do frame anterior: mais alto = menos tremor, mais "arrasto"
+    const val DEPTH_STEP = 3                   // profundidade calculada em 1 de cada 3 frames (resto interpolado)
 
-    class Result(val dir: File, val frames: Int, val fps: Float)
+    class Result(val dir: File, val frames: Int, val fps: Float, val depthMsg: String)
 
     fun process(ctx: Context, uri: Uri, outDir: File, progress: (done: Int, total: Int) -> Unit): Result {
         val r = MediaMetadataRetriever()
@@ -61,6 +62,15 @@ object VideoProcessor {
             }
             val deflater = Deflater(Deflater.BEST_SPEED)
 
+            // Profundidade (se o modelo falhar, o vídeo fica sem malha 3D)
+            var depthErr: String? = null
+            val estimator = try { DepthEstimator(ctx) } catch (e: Throwable) {
+                depthErr = "${e.javaClass.simpleName}: ${e.message}"; null
+            }
+            val depthLines = StringBuilder()
+            var depthMs = 0L
+            var depthCount = 0
+
             var mw = 0; var mh = 0
             var prev: FloatArray? = null
             var avg: FloatArray? = null
@@ -90,6 +100,16 @@ object VideoProcessor {
                 }
 
                 val res = Tasks.await(segmenter.process(InputImage.fromBitmap(small, 0)))
+                var keyDepth: FloatArray? = null
+                if (estimator != null && depthErr == null && k % DEPTH_STEP == 0) {
+                    try {
+                        val dr = estimator.estimate(small)
+                        keyDepth = DepthEstimator.downsample(dr.d, dr.w, dr.h, DepthMesh.DW, DepthMesh.DH)
+                        depthMs += dr.ms; depthCount++
+                    } catch (e: Throwable) {
+                        depthErr = "${e.javaClass.simpleName}: ${e.message}"
+                    }
+                }
                 small.recycle()
                 val conf = res.foregroundConfidenceMask
                 val p = prev!!; val a = avg!!; val b = bytes!!
@@ -103,11 +123,32 @@ object VideoProcessor {
                     b[i] = (smoothstep(0.3f, 0.7f, s) * 255f).roundToInt().toByte()
                 }
                 writeDeflated(VideoClip.maskFile(outDir, k), b, deflater)
+                if (keyDepth != null) {
+                    // medianas sujeito/fundo com a máscara deste frame
+                    val alpha = IntArray(DepthMesh.DW * DepthMesh.DH) { i ->
+                        val x = (i % DepthMesh.DW) * mw / DepthMesh.DW
+                        val y = (i / DepthMesh.DW) * mh / DepthMesh.DH
+                        b[y * mw + x].toInt() and 0xFF
+                    }
+                    val med = DepthEstimator.medians(keyDepth, alpha)
+                    val bytes = ByteArray(keyDepth.size) { (keyDepth[it] * 255f).roundToInt().coerceIn(0, 255).toByte() }
+                    VideoClip.depthFile(outDir, k / DEPTH_STEP).writeBytes(bytes)
+                    depthLines.append("${med.first} ${med.second}\n")
+                }
                 written++
                 progress(written, total)
             }
             deflater.end()
             segmenter.close()
+            estimator?.close()
+            val keys = depthLines.lines().count { it.isNotBlank() }
+            val depthMsg = if (depthErr == null && keys > 0) {
+                VideoClip.depthMetaFile(outDir).writeText("${DEPTH_STEP} $keys\n$depthLines")
+                "Profundidade 3D ativa ($keys frames-chave, ~${depthMs / max(1, depthCount)} ms cada)."
+            } else {
+                VideoClip.depthMetaFile(outDir).delete()
+                "Profundidade indisponível no vídeo (${depthErr ?: "sem frames"})."
+            }
             if (written < 2) throw IllegalStateException("Não consegui extrair frames do vídeo.")
 
             // Máscara média → usada para escolher a posição do relógio
@@ -121,7 +162,7 @@ object VideoProcessor {
             avgBmp.recycle()
 
             VideoClip.metaFile(outDir).writeText("$written $outFps $mw $mh")
-            return Result(outDir, written, outFps)
+            return Result(outDir, written, outFps, depthMsg)
         } finally {
             r.release()
         }
