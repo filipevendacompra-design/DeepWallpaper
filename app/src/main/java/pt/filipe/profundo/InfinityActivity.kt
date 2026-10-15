@@ -16,6 +16,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -73,13 +74,23 @@ class InfinityActivity : ComponentActivity() {
             gravity = Gravity.CENTER_HORIZONTAL
         })
 
+        // Ambiente — muda os valores de partida e reconstrói o ecrã
+        root.addView(section("Ambiente"))
+        root.addView(HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(chips(listOf("Espelho LED", "Tijolo", "Poço", "Grelha néon", "Hiperespaço"), { inf.theme }, fixed = true) {
+                inf = inf.withThemeDefaults(it)
+                rebuild()
+            })
+        })
+
         // Forma
         root.addView(section("Forma"))
         root.addView(chips(listOf("Ecrã", "Círculo", "Hexágono"), { inf.shape }) { inf = inf.copy(shape = it) })
 
         // LEDs
         root.addView(section("LEDs"))
-        root.addView(chips(listOf("Pontos", "Linha", "Ambos"), { inf.leds }) { inf = inf.copy(leds = it) })
+        root.addView(chips(listOf("Pontos", "Linha", "Ambos", "Nenhum"), { inf.leds }) { inf = inf.copy(leds = it) })
         root.addView(check("Brilho suave", inf.glow) { inf = inf.copy(glow = it) })
 
         // Cor
@@ -120,6 +131,15 @@ class InfinityActivity : ComponentActivity() {
         slider(root, "Espaçamento", 84, 95, (inf.spacing * 100).roundToInt(), { "$it" }) {
             inf = inf.copy(spacing = it / 100f)
         }
+        slider(root, "Paredes", 0, 100, (inf.wall * 100).roundToInt(), { "$it%" }) {
+            inf = inf.copy(wall = it / 100f)
+        }
+        slider(root, "Tinta do vidro", 0, 100, (inf.tint * 100).roundToInt(), { "$it%" }) {
+            inf = inf.copy(tint = it / 100f)
+        }
+        slider(root, "Movimento", 0, 100, (inf.motion * 100).roundToInt(), { if (it == 0) "parado" else "$it" }) {
+            inf = inf.copy(motion = it / 100f)
+        }
         slider(root, "LEDs a correr", 0, 100, (inf.speed * 100).roundToInt(), { if (it == 0) "parado" else "$it" }) {
             inf = inf.copy(speed = it / 100f)
         }
@@ -137,7 +157,18 @@ class InfinityActivity : ComponentActivity() {
             setOnClickListener { apply() }
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(24) })
 
-        setContentView(ScrollView(this).apply { setBackgroundColor(bgColor); addView(root) })
+        scroll = ScrollView(this).apply { setBackgroundColor(bgColor); addView(root) }
+        setContentView(scroll)
+    }
+
+    private var scroll: ScrollView? = null
+
+    /** Reconstrói o ecrã (ao mudar de ambiente) sem perder a posição do scroll. */
+    private fun rebuild() {
+        val y = scroll?.scrollY ?: 0
+        chipGroups.clear()
+        buildUi()
+        scroll?.post { scroll?.scrollTo(0, y) }
     }
 
     private var hueBar: SeekBar? = null
@@ -153,7 +184,7 @@ class InfinityActivity : ComponentActivity() {
         setOnCheckedChangeListener { _, c -> onChange(c) }
     }
 
-    private fun chips(labels: List<String>, current: () -> Int, onPick: (Int) -> Unit): LinearLayout {
+    private fun chips(labels: List<String>, current: () -> Int, fixed: Boolean = false, onPick: (Int) -> Unit): LinearLayout {
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val buttons = labels.mapIndexed { i, label ->
             Button(this).apply {
@@ -162,7 +193,10 @@ class InfinityActivity : ComponentActivity() {
             }
         }
         buttons.forEach {
-            row.addView(it, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(8) })
+            val lp = if (fixed) LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44))
+                     else LinearLayout.LayoutParams(0, dp(44), 1f)
+            if (fixed) it.setPadding(dp(16), 0, dp(16), 0)
+            row.addView(it, lp.apply { rightMargin = dp(8) })
         }
         chipGroups.add(buttons to current)
         refreshChips()

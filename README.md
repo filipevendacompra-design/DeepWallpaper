@@ -15,7 +15,9 @@ e desenha o relógio **entre o fundo e o sujeito** — o efeito de profundidade 
 - No bloqueio só reproduz: frame → relógio → frame cortado pela máscara
 
 ## Túnel infinito
-- Simulação de espelho infinito: forma, LEDs, cor, profundidade, LEDs a correr
+- Perspetiva real (distância constante entre reflexos) com paredes desenhadas em lote
+- Ambientes: Espelho LED, Tijolo, Poço, Grelha néon, Hiperespaço
+- Forma, LEDs, cor, paredes, tinta do vidro, movimento, LEDs a correr
 - Relógio "afundado" dentro do túnel; inclinação move o ponto de fuga
 
 ## Preparar o Samsung
