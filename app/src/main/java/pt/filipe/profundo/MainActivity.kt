@@ -151,7 +151,18 @@ class MainActivity : ComponentActivity() {
             text = "Efeito paralaxe (mexe com a inclinação do telemóvel)"
             setTextColor(Color.rgb(220, 220, 225))
             isChecked = cfg.parallax
-            setOnCheckedChangeListener { _, c -> cfg = cfg.copy(parallax = c); renderPreview() }
+            setOnCheckedChangeListener { _, c -> cfg = cfg.copy(parallax = c); prepareSmall(); renderPreview() }
+        })
+
+        root.addView(label("Intensidade da paralaxe"))
+        root.addView(SeekBar(this).apply {
+            max = 100
+            // 0..100 → 0.25..2.0 (meio ≈ 1.1)
+            progress = ((cfg.intensity - 0.25f) / 1.75f * 100).roundToInt().coerceIn(0, 100)
+            setOnSeekBarChangeListener(simpleListener { p ->
+                cfg = cfg.copy(intensity = 0.25f + p / 100f * 1.75f)
+                prepareSmall(); renderPreview()
+            })
         })
 
         applyBtn = Button(this).apply {
@@ -244,7 +255,7 @@ class MainActivity : ComponentActivity() {
         val f = fg ?: return
         val w = 270
         val h = (w * screenH.toFloat() / screenW).toInt()
-        fgSmall = DepthRenderer.fgForScreen(f, w, h)
+        fgSmall = DepthRenderer.fgForScreen(f, w, h, DepthRenderer.zoomFor(cfg))
     }
 
     private fun autoPosition() {

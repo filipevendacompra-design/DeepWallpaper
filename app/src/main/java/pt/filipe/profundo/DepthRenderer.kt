@@ -21,12 +21,14 @@ data class ClockConfig(
     val size: Float,       // tamanho do texto, fração da largura
     val color: Int,
     val showOnHome: Boolean,
-    val parallax: Boolean
+    val parallax: Boolean,
+    val intensity: Float = 1f   // multiplicador da paralaxe (0.25..2)
 ) {
     fun save(p: SharedPreferences) = p.edit()
         .putFloat("y", y).putFloat("size", size)
         .putInt("color", color).putBoolean("home", showOnHome)
         .putBoolean("parallax", parallax)
+        .putFloat("intensity", intensity)
         .apply()
 
     companion object {
@@ -35,7 +37,8 @@ data class ClockConfig(
             size = p.getFloat("size", 0.30f),
             color = p.getInt("color", Color.WHITE),
             showOnHome = p.getBoolean("home", false),
-            parallax = p.getBoolean("parallax", true)
+            parallax = p.getBoolean("parallax", true),
+            intensity = p.getFloat("intensity", 1f)
         )
     }
 }
@@ -66,8 +69,11 @@ object DepthRenderer {
 
     // Paralaxe: a foto (fundo + sujeito) move-se em bloco e o relógio a outra velocidade.
     // Fundo e sujeito nunca se separam — o fundo ainda contém o sujeito, separá-los criaria um "fantasma".
-    private const val PARALLAX_ZOOM = 1.06f      // margem extra para as bordas não aparecerem
-    private const val IMAGE_AMPLITUDE = 0.025f   // deslocamento máximo da foto, fração da largura
+    private const val PARALLAX_ZOOM = 0.06f      // margem extra (por unidade de intensidade) para as bordas não aparecerem
+    private const val IMAGE_AMPLITUDE = 0.025f   // deslocamento máximo da foto com intensidade 1, fração da largura
+
+    /** Ampliação da foto: cresce com a intensidade para o deslocamento nunca mostrar as bordas. */
+    fun zoomFor(cfg: ClockConfig) = if (cfg.parallax) 1f + PARALLAX_ZOOM * cfg.intensity else 1f
     private const val CLOCK_FACTOR = 0.4f        // o relógio move-se 40% do que a foto se move
 
     /**
@@ -80,8 +86,8 @@ object DepthRenderer {
     ) {
         val w = c.width
         val h = c.height
-        val zoom = if (cfg.parallax) PARALLAX_ZOOM else 1f
-        val amp = IMAGE_AMPLITUDE * w
+        val zoom = zoomFor(cfg)
+        val amp = if (cfg.parallax) IMAGE_AMPLITUDE * cfg.intensity * w else 0f
         val dx = (tiltX * amp).toInt()
         val dy = (tiltY * amp).toInt()
         val ox = (w * (zoom - 1f) / 2f).toInt()
@@ -128,9 +134,11 @@ object DepthRenderer {
     }
 
     /** Sujeito redimensionado para um ecrã w×h (usado para medir cobertura). */
-    fun fgForScreen(fg: Bitmap, w: Int, h: Int): Bitmap {
+    fun fgForScreen(fg: Bitmap, w: Int, h: Int, zoom: Float = 1f): Bitmap {
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        Canvas(out).drawBitmap(fg, srcRectFor(fg.width, fg.height, w, h), Rect(0, 0, w, h), bmpPaint)
+        val ox = (w * (zoom - 1f) / 2f).toInt()
+        val oy = (h * (zoom - 1f) / 2f).toInt()
+        Canvas(out).drawBitmap(fg, srcRectFor(fg.width, fg.height, w, h), Rect(-ox, -oy, w + ox, h + oy), bmpPaint)
         return out
     }
 
