@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Profundo: um "relógio" (círculo) atrás de um sujeito — a ideia da app num ícone -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#7ABAFF"
+        android:pathData="M54,26 a20,20 0 1,0 0.01,0 Z" />
+    <path android:fillColor="#0B1220" android:fillAlpha="0.35"
+        android:pathData="M54,30 a16,16 0 1,0 0.01,0 Z" />
+    <path android:fillColor="#7ABAFF"
+        android:pathData="M53,34 h2 v12 h-2 Z M54,45 l8,4 -1,1.8 -8,-4 Z" />
+    <path android:fillColor="#EEF1F7"
+        android:pathData="M64,47 a9.5,9.5 0 1,0 0.01,0 Z" />
+    <path android:fillColor="#EEF1F7"
+        android:pathData="M45,86 C45,73 53,68 64,68 C75,68 83,73 83,86 Z" />
+</vector>

@@ -2,7 +2,9 @@ package pt.filipe.profundo
 
 import android.app.WallpaperManager
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -17,15 +19,17 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.format.DateFormat
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.Button
-import android.widget.CheckBox
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
-import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.PickVisualMediaRequest
@@ -43,20 +47,24 @@ import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
 
-    // ---- Conteúdo ----
-    private var bg: Bitmap? = null
-    private var fg: Bitmap? = null
-    private var fgSmall: Bitmap? = null       // sujeito à escala da pré-visualização (cobertura)
-    private var mask: Bitmap? = null          // vídeo: máscara do 1.º frame
+    // ---- Conteúdo (versões completas: são as que se guardam) ----
+    private var bgFull: Bitmap? = null
+    private var fgFull: Bitmap? = null
+    private var photoDepth: DepthEstimator.Result? = null
+
+    // ---- Versões leves para a pré-visualização ----
+    private var bgPrev: Bitmap? = null
+    private var fgPrev: Bitmap? = null
+    private var maskPrev: Bitmap? = null      // vídeo: máscara do 1.º frame
     private var avgMask: Bitmap? = null       // vídeo: máscara média
+    private var previewMesh: DepthMesh? = null
+    private var meter: CoverageMeter? = null
+
     private var pendingMode = Store.MODE_PHOTO
     private var busy = false
     private lateinit var cfg: ClockConfig
-
-    // Profundidade da foto escolhida (calculada logo ao importar)
-    private var photoDepth: DepthEstimator.Result? = null
-    private var previewMesh: DepthMesh? = null
     private var depthMsg = ""
+    private var is24 = true
 
     private var screenW = 1080
     private var screenH = 2340
@@ -64,17 +72,24 @@ class MainActivity : ComponentActivity() {
     // ---- UI ----
     private lateinit var status: TextView
     private lateinit var coverageText: TextView
-    private lateinit var preview: ImageView
+    private lateinit var preview: PreviewView
+    private lateinit var progress: ProgressBar
     private lateinit var posBar: SeekBar
-    private lateinit var applyBtn: Button
-    private var previewBmp: Bitmap? = null
-    private val chipGroups = mutableListOf<Pair<List<Button>, () -> Int>>()
+    private lateinit var applyBtn: TextView
+    private lateinit var panelHost: ScrollView
+    private val panels = mutableListOf<View>()
+    private val tabs = mutableListOf<TextView>()
+    private val chipGroups = mutableListOf<Pair<List<TextView>, () -> Int>>()
+    private val swatchViews = mutableListOf<Pair<View, Int>>()
 
-    private val bgColor = Color.rgb(14, 14, 16)
-    private val cardColor = Color.rgb(28, 28, 32)
-    private val textColor = Color.rgb(228, 228, 232)
-    private val mutedColor = Color.rgb(140, 140, 150)
-    private val accent = Color.rgb(120, 190, 255)
+    // ---- Cores do tema ----
+    private val bgColor = Color.rgb(11, 11, 13)
+    private val surface = Color.rgb(22, 22, 26)
+    private val surface2 = Color.rgb(32, 32, 38)
+    private val textColor = Color.rgb(236, 236, 240)
+    private val mutedColor = Color.rgb(142, 142, 152)
+    private val accent = Color.rgb(122, 186, 255)
+    private val onAccent = Color.rgb(8, 18, 30)
 
     private val swatches = intArrayOf(
         Color.WHITE, Color.rgb(255, 236, 205), Color.rgb(255, 214, 102), Color.rgb(255, 159, 90),
@@ -93,189 +108,318 @@ class MainActivity : ComponentActivity() {
         if (uri != null) importVideo(uri)
     }
 
-    // ---- Pré-visualização animada (mostra o 3D a balançar) ----
     private val ui = Handler(Looper.getMainLooper())
-    private val animStart = SystemClock.uptimeMillis()
-    private val animLoop = object : Runnable {
-        override fun run() {
-            renderPreview(animated = true)
-            if (previewMesh != null && cfg.parallax) ui.postDelayed(this, 40)
-        }
-    }
+    private val coverageRunnable = Runnable { updateCoverageNow() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         readScreenSize()
         cfg = ClockConfig.load(Store.prefs(this))
+        is24 = DateFormat.is24HourFormat(this)
+        window.statusBarColor = bgColor
+        window.navigationBarColor = surface
         buildUi()
-        loadSaved()
+        loadSavedAsync()
     }
 
-    override fun onResume() { super.onResume(); startAnim() }
-    override fun onPause() { super.onPause(); ui.removeCallbacks(animLoop) }
+    override fun onResume() { super.onResume(); preview.running = true; preview.invalidate() }
+    override fun onPause() { super.onPause(); preview.running = false }
 
-    private fun startAnim() {
-        ui.removeCallbacks(animLoop)
-        if (previewMesh != null && cfg.parallax) ui.post(animLoop) else renderPreview(animated = false)
+    // ================= Pré-visualização =================
+
+    /** Desenha diretamente no ecrã (acelerado por hardware) — não cria bitmaps a cada frame. */
+    inner class PreviewView(ctx: Context) : View(ctx) {
+        private val painter = ClockPainter()
+        private val start = SystemClock.uptimeMillis()
+        var running = true
+
+        init {
+            background = GradientDrawable().apply { cornerRadius = dp(22).toFloat(); setColor(Color.BLACK) }
+            clipToOutline = true
+        }
+
+        private fun animating() = running && previewMesh != null && cfg.parallax
+
+        override fun onDraw(canvas: Canvas) {
+            val bg = bgPrev
+            if (bg == null) {
+                painter.draw(canvas, cfg, Date(), is24, withDate = true)
+                return
+            }
+            var tx = 0f; var ty = 0f
+            if (animating()) {
+                val t = (SystemClock.uptimeMillis() - start) / 1000f
+                tx = 0.8f * sin(t * 1.1f)
+                ty = 0.35f * sin(t * 0.7f + 1.2f)
+            }
+            DepthRenderer.draw(
+                canvas, bg, fgPrev, cfg, painter, showClock = true, now = Date(),
+                is24 = is24, tiltX = tx, tiltY = ty, mask = maskPrev, depth = previewMesh
+            )
+            if (animating()) postInvalidateOnAnimation()
+        }
     }
 
     // ================= UI =================
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).roundToInt()
 
+    private fun rounded(color: Int, radius: Int, stroke: Int = 0) = GradientDrawable().apply {
+        cornerRadius = dp(radius).toFloat(); setColor(color)
+        if (stroke != 0) setStroke(dp(1), stroke)
+    }
+
+    private fun haptic(v: View) = v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+
     private fun buildUi() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(28), dp(16), dp(40))
             setBackgroundColor(bgColor)
         }
-        root.addView(TextView(this).apply { text = "Profundo"; textSize = 26f; setTextColor(textColor) })
+        // Edge-to-edge (Android 15): respeita a barra de estado e a de navegação
+        root.setOnApplyWindowInsetsListener { v, insets ->
+            @Suppress("DEPRECATION")
+            v.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
+            insets
+        }
 
-        val pick = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        pick.addView(pill("Escolher foto") {
+        // ---------- Topo: título + escolher ----------
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(10), dp(12), dp(6))
+        }
+        top.addView(TextView(this).apply {
+            text = "Profundo"; textSize = 22f; setTextColor(textColor)
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, 600, false)
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        top.addView(pill("Foto") {
             if (!busy) pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-        }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(8) })
-        pick.addView(pill("Vídeo (${VideoProcessor.MAX_SECONDS.toInt()} s)") {
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)).apply { rightMargin = dp(8) })
+        top.addView(pill("Vídeo") {
             if (!busy) pickVideo.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-        }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        root.addView(pick, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)))
+        root.addView(top)
+
+        // ---------- Pré-visualização fixa ----------
+        val ph = (resources.displayMetrics.heightPixels * 0.40f).toInt()
+        val pw = (ph * screenW / screenH.toFloat()).toInt()
+        val previewBox = FrameLayout(this)
+        preview = PreviewView(this)
+        previewBox.addView(preview, FrameLayout.LayoutParams(pw, ph, Gravity.CENTER))
+        progress = ProgressBar(this).apply {
+            isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(accent)
+            visibility = View.GONE
+        }
+        previewBox.addView(progress, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER))
+        root.addView(previewBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ph).apply { topMargin = dp(4) })
 
         status = TextView(this).apply {
-            text = "Escolhe uma foto com um sujeito bem destacado."
-            textSize = 13f; setTextColor(mutedColor); setPadding(0, dp(10), 0, dp(6))
+            text = "A carregar…"; textSize = 12.5f; setTextColor(mutedColor)
+            gravity = Gravity.CENTER; setPadding(dp(18), dp(8), dp(18), 0)
         }
         root.addView(status)
-
-        preview = ImageView(this).apply {
-            adjustViewBounds = true
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            background = GradientDrawable().apply { cornerRadius = dp(18).toFloat(); setColor(Color.BLACK) }
-            clipToOutline = true
-        }
-        val ph = (resources.displayMetrics.heightPixels * 0.5f).toInt()
-        val pw = (ph * screenW / screenH.toFloat()).toInt()
-        root.addView(preview, LinearLayout.LayoutParams(pw, ph).apply { gravity = Gravity.CENTER_HORIZONTAL })
         coverageText = TextView(this).apply {
-            textSize = 13f; setTextColor(mutedColor); gravity = Gravity.CENTER; setPadding(0, dp(8), 0, 0)
+            textSize = 12.5f; setTextColor(accent); gravity = Gravity.CENTER; setPadding(dp(18), dp(2), dp(18), dp(6))
         }
         root.addView(coverageText)
 
-        // ---------- Relógio ----------
-        root.addView(section("Relógio"))
-        root.addView(chips(listOf("Horizontal", "Vertical", "Analógico"), { cfg.style }) {
-            cfg = cfg.copy(style = it); onClockChanged()
+        // ---------- Separadores ----------
+        val tabBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = rounded(surface, 14)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        listOf("Relógio", "Cor", "Efeito 3D", "Mais").forEachIndexed { i, t ->
+            val tab = TextView(this).apply {
+                text = t; textSize = 13.5f; gravity = Gravity.CENTER
+                setOnClickListener { haptic(it); selectTab(i) }
+            }
+            tabs.add(tab)
+            tabBar.addView(tab, LinearLayout.LayoutParams(0, dp(38), 1f))
+        }
+        root.addView(tabBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            leftMargin = dp(14); rightMargin = dp(14); topMargin = dp(4)
         })
-        root.addView(scrollChips(listOf("Moderno", "Fino", "Condensado", "Clássico", "Mono"), { cfg.font }) {
-            cfg = cfg.copy(font = it); onClockChanged()
-        })
-        root.addView(chips(listOf("Data acima", "Data abaixo", "Sem data"), { cfg.dateMode }) {
-            cfg = cfg.copy(dateMode = it); onClockChanged()
-        })
-        posBar = slider(root, "Posição", 0, 100, ((cfg.y - 0.05f) / 0.6f * 100).roundToInt(), { "$it" }) {
+
+        // ---------- Painéis (só este bloco faz scroll) ----------
+        panelHost = ScrollView(this).apply { isVerticalScrollBarEnabled = false; isFillViewport = true }
+        val panelsBox = FrameLayout(this)
+        panels.add(clockPanel()); panels.add(colorPanel()); panels.add(effectPanel()); panels.add(morePanel())
+        panels.forEach { panelsBox.addView(it) }
+        panelHost.addView(panelsBox)
+        root.addView(panelHost, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // ---------- Botão fixo em baixo ----------
+        val bottom = FrameLayout(this).apply { setBackgroundColor(surface); setPadding(dp(14), dp(10), dp(14), dp(10)) }
+        applyBtn = TextView(this).apply {
+            text = "Aplicar como fundo"; textSize = 16f; gravity = Gravity.CENTER
+            setTextColor(onAccent)
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, 600, false)
+            background = rounded(accent, 16)
+            setOnClickListener { haptic(it); saveAndApply() }
+        }
+        bottom.addView(applyBtn, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)))
+        root.addView(bottom)
+
+        setContentView(root)
+        selectTab(0)
+    }
+
+    private fun selectTab(i: Int) {
+        panels.forEachIndexed { k, p -> p.visibility = if (k == i) View.VISIBLE else View.GONE }
+        tabs.forEachIndexed { k, t ->
+            val on = k == i
+            t.setTextColor(if (on) onAccent else mutedColor)
+            t.background = if (on) rounded(accent, 11) else null
+        }
+        panelHost.scrollTo(0, 0)
+    }
+
+    private fun panel(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(18), dp(8), dp(18), dp(24))
+    }
+
+    private fun clockPanel() = panel().apply {
+        addView(section("Estilo"))
+        addView(chips(listOf("Horizontal", "Vertical", "Analógico"), { cfg.style }) { cfg = cfg.copy(style = it); onClockChanged() })
+        addView(section("Letra"))
+        addView(scrollChips(listOf("Moderno", "Fino", "Condensado", "Clássico", "Mono"), { cfg.font }) { cfg = cfg.copy(font = it); onClockChanged() })
+        addView(section("Data"))
+        addView(chips(listOf("Acima", "Abaixo", "Sem data"), { cfg.dateMode }) { cfg = cfg.copy(dateMode = it); onClockChanged() })
+        addView(section("Posição e tamanho"))
+        posBar = slider(this, "Posição", 0, 100, ((cfg.y - 0.05f) / 0.6f * 100).roundToInt(), { "$it" }) {
             cfg = cfg.copy(y = 0.05f + it / 100f * 0.6f); onClockChanged()
         }
-        slider(root, "Tamanho", 0, 100, ((cfg.size - 0.12f) / 0.30f * 100).roundToInt(), { "$it" }) {
+        slider(this, "Tamanho", 0, 100, ((cfg.size - 0.12f) / 0.30f * 100).roundToInt(), { "$it" }) {
             cfg = cfg.copy(size = 0.12f + it / 100f * 0.30f); onClockChanged()
         }
-        slider(root, "Opacidade", 30, 100, (cfg.opacity * 100).roundToInt(), { "$it%" }) {
+        slider(this, "Opacidade", 30, 100, (cfg.opacity * 100).roundToInt(), { "$it%" }) {
             cfg = cfg.copy(opacity = it / 100f); onClockChanged()
         }
-        root.addView(check("Contorno (só o traço)", cfg.outline) { cfg = cfg.copy(outline = it); onClockChanged() })
-        root.addView(check("Sombra suave", cfg.shadow) { cfg = cfg.copy(shadow = it); onClockChanged() })
-        root.addView(check("Relógio à frente do sujeito", cfg.front) { cfg = cfg.copy(front = it); onClockChanged() })
-        root.addView(pill("Posição automática") { autoPosition() },
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(8) })
+        addView(pill("Posição automática") { autoPosition() },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(12) })
+        addView(section("Acabamento"))
+        addView(toggle("Relógio à frente do sujeito", cfg.front) { cfg = cfg.copy(front = it); onClockChanged() })
+        addView(toggle("Só contorno", cfg.outline) { cfg = cfg.copy(outline = it); onClockChanged() })
+        addView(toggle("Sombra suave", cfg.shadow) { cfg = cfg.copy(shadow = it); onClockChanged() })
+    }
 
-        // ---------- Cor ----------
-        root.addView(section("Cor"))
-        val sw = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        sw.addView(pill("Auto") { autoColor() }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40)).apply { rightMargin = dp(10) })
-        swatches.forEach { col ->
-            sw.addView(View(this).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL; setColor(col); setStroke(dp(1), Color.argb(90, 255, 255, 255))
+    private fun colorPanel() = panel().apply {
+        addView(section("Cores"))
+        val grid = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+        swatches.toList().chunked(6).forEach { rowColors ->
+            val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+            rowColors.forEach { col ->
+                val v = View(this@MainActivity).apply {
+                    setOnClickListener { haptic(it); cfg = cfg.copy(color = col); onClockChanged(); refreshSwatches() }
                 }
-                setOnClickListener { cfg = cfg.copy(color = col); onClockChanged() }
-            }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { rightMargin = dp(10); gravity = Gravity.CENTER_VERTICAL })
+                swatchViews.add(v to col)
+                row.addView(v, LinearLayout.LayoutParams(0, dp(44), 1f).apply { setMargins(dp(5), dp(5), dp(5), dp(5)) })
+            }
+            grid.addView(row)
         }
-        root.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(sw) })
-        slider(root, "Tom personalizado", 0, 360, 0, { "${it}°" }) {
-            cfg = cfg.copy(color = Color.HSVToColor(floatArrayOf(it.toFloat(), 0.65f, 1f))); onClockChanged()
+        addView(grid)
+        refreshSwatches()
+        addView(pill("Cor automática a partir da foto") { autoColor() },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(10) })
+        addView(section("Tom personalizado"))
+        slider(this, "Tom", 0, 360, 0, { "${it}°" }) {
+            cfg = cfg.copy(color = Color.HSVToColor(floatArrayOf(it.toFloat(), 0.65f, 1f))); onClockChanged(); refreshSwatches()
         }
+    }
 
-        // ---------- Efeito 3D ----------
-        root.addView(section("Efeito 3D"))
-        root.addView(check("Profundidade com a inclinação", cfg.parallax) { cfg = cfg.copy(parallax = it); onEffectChanged() })
-        slider(root, "Intensidade", 0, 100, ((cfg.intensity - 0.25f) / 3.75f * 100).roundToInt(),
+    private fun effectPanel() = panel().apply {
+        addView(section("Profundidade"))
+        addView(toggle("Efeito 3D com a inclinação", cfg.parallax) { cfg = cfg.copy(parallax = it); onEffectChanged() })
+        slider(this, "Intensidade", 0, 100, ((cfg.intensity - 0.25f) / 3.75f * 100).roundToInt(),
             { "%.1f×".format(0.25f + it / 100f * 3.75f) }) {
             cfg = cfg.copy(intensity = 0.25f + it / 100f * 3.75f); onEffectChanged()
         }
-        slider(root, "Separação de planos", 0, 100, (cfg.separation * 100).roundToInt(), { "$it%" }) {
+        slider(this, "Separação de planos", 0, 100, (cfg.separation * 100).roundToInt(), { "$it%" }) {
             cfg = cfg.copy(separation = it / 100f); onEffectChanged()
         }
-        root.addView(label("Ponto fixo (o que fica parado)"))
-        root.addView(chips(listOf("Relógio", "Sujeito", "Fundo"), { cfg.focus }) { cfg = cfg.copy(focus = it); onEffectChanged() })
-        slider(root, "Suavidade das bordas", 0, 100, (cfg.smooth * 100).roundToInt(), { "$it%" }) {
+        slider(this, "Suavidade das bordas", 0, 100, (cfg.smooth * 100).roundToInt(), { "$it%" }) {
             cfg = cfg.copy(smooth = it / 100f); onEffectChanged()
         }
-        root.addView(check("Inverter direção", cfg.invert) { cfg = cfg.copy(invert = it); onEffectChanged() })
-        root.addView(check("Movimento automático (balança sozinho)", cfg.autoMotion) { cfg = cfg.copy(autoMotion = it) })
-
-        // ---------- Ecrã inicial ----------
-        root.addView(section("Ecrã inicial"))
-        root.addView(check("Mostrar o relógio também no ecrã inicial", cfg.showOnHome) { cfg = cfg.copy(showOnHome = it) })
-
-        applyBtn = Button(this).apply {
-            text = "Aplicar como fundo"; isAllCaps = false; textSize = 16f
-            setTextColor(Color.rgb(10, 20, 30))
-            background = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(accent) }
-            setOnClickListener { saveAndApply() }
-        }
-        root.addView(applyBtn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)).apply { topMargin = dp(24) })
-
-        root.addView(TextView(this).apply {
-            text = "No Good Lock → LockStar, usa um relógio só com espaços para esconder o da Samsung. " +
-                "Aplica o fundo ao ecrã de bloqueio e ao inicial."
-            textSize = 12f; setTextColor(mutedColor); setPadding(0, dp(14), 0, 0)
-        })
-
-        setContentView(ScrollView(this).apply { setBackgroundColor(bgColor); addView(root) })
+        addView(section("Ponto fixo"))
+        addView(chips(listOf("Relógio", "Sujeito", "Fundo"), { cfg.focus }) { cfg = cfg.copy(focus = it); onEffectChanged() })
+        addView(section("Movimento"))
+        addView(toggle("Inverter direção", cfg.invert) { cfg = cfg.copy(invert = it); onEffectChanged() })
+        addView(toggle("Balançar sozinho", cfg.autoMotion) { cfg = cfg.copy(autoMotion = it) })
     }
+
+    private fun morePanel() = panel().apply {
+        addView(section("Ecrã inicial"))
+        addView(toggle("Mostrar o relógio no ecrã inicial", cfg.showOnHome) { cfg = cfg.copy(showOnHome = it) })
+        addView(toggle("Ecrã inicial parado (poupa bateria)", cfg.homeStatic) { cfg = cfg.copy(homeStatic = it) })
+        addView(hint("O efeito 3D continua no ecrã de bloqueio. No ecrã inicial a foto fica fixa e o sensor desliga-se."))
+        addView(section("Armazenamento"))
+        val used = TextView(this@MainActivity).apply { textSize = 14f; setTextColor(textColor) }
+        addView(used)
+        Thread { val mb = Store.usedMb(this@MainActivity); runOnUiThread { used.text = "A app ocupa %.0f MB".format(mb) } }.start()
+        addView(pill("Apagar o que não está em uso") {
+            if (busy) return@pill
+            Thread {
+                val freed = Store.cleanup(this@MainActivity)
+                val mb = Store.usedMb(this@MainActivity)
+                runOnUiThread { used.text = "A app ocupa %.0f MB (libertados %.0f MB)".format(mb, freed) }
+            }.start()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(10) })
+        addView(section("Samsung"))
+        addView(hint("No Good Lock → LockStar, usa um relógio só com espaços para esconder o da Samsung. " +
+            "Aplica o fundo ao ecrã de bloqueio e ao inicial."))
+    }
+
+    // ---------- componentes ----------
 
     private fun section(t: String) = TextView(this).apply {
-        text = t.uppercase(); textSize = 12f; letterSpacing = 0.08f; setTextColor(mutedColor)
-        setPadding(0, dp(26), 0, dp(8))
+        text = t.uppercase(); textSize = 11.5f; letterSpacing = 0.1f; setTextColor(mutedColor)
+        setPadding(0, dp(18), 0, dp(8))
     }
 
-    private fun label(t: String) = TextView(this).apply {
-        text = t; textSize = 14f; setTextColor(textColor); setPadding(0, dp(10), 0, dp(6))
+    private fun hint(t: String) = TextView(this).apply {
+        text = t; textSize = 12.5f; setTextColor(mutedColor); setPadding(0, dp(6), 0, dp(4))
     }
 
-    private fun pill(t: String, onClick: () -> Unit) = Button(this).apply {
-        text = t; isAllCaps = false; textSize = 14f; setTextColor(textColor)
-        background = GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(cardColor) }
-        setPadding(dp(14), 0, dp(14), 0)
-        setOnClickListener { onClick() }
+    private fun pill(t: String, onClick: () -> Unit) = TextView(this).apply {
+        text = t; textSize = 14f; gravity = Gravity.CENTER; setTextColor(textColor)
+        background = rounded(surface2, 12)
+        setPadding(dp(16), 0, dp(16), 0)
+        setOnClickListener { haptic(it); onClick() }
     }
 
-    private fun check(t: String, initial: Boolean, onChange: (Boolean) -> Unit) = CheckBox(this).apply {
-        text = t; setTextColor(textColor); isChecked = initial
-        setOnCheckedChangeListener { _, c -> onChange(c) }
+    private fun toggle(t: String, initial: Boolean, onChange: (Boolean) -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, dp(6), 0, dp(6))
+        addView(TextView(this@MainActivity).apply { text = t; textSize = 14.5f; setTextColor(textColor) },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val sw = Switch(this@MainActivity).apply {
+            isChecked = initial
+            thumbTintList = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(accent, Color.rgb(200, 200, 208)))
+            trackTintList = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf()), intArrayOf(Color.argb(120, 122, 186, 255), Color.rgb(70, 70, 80)))
+            setOnCheckedChangeListener { v, c -> haptic(v); onChange(c) }
+        }
+        addView(sw)
+        setOnClickListener { sw.toggle() }
     }
 
     private fun chipRow(labels: List<String>, current: () -> Int, fixed: Boolean, onPick: (Int) -> Unit): LinearLayout {
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val buttons = labels.mapIndexed { i, l ->
-            Button(this).apply {
-                text = l; isAllCaps = false; textSize = 14f
-                if (fixed) setPadding(dp(16), 0, dp(16), 0)
-                setOnClickListener { onPick(i); refreshChips() }
+            TextView(this).apply {
+                text = l; textSize = 14f; gravity = Gravity.CENTER
+                setPadding(dp(16), 0, dp(16), 0)
+                setOnClickListener { haptic(it); onPick(i); refreshChips() }
             }
         }
         buttons.forEach {
-            val lp = if (fixed) LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(42))
-                     else LinearLayout.LayoutParams(0, dp(42), 1f)
-            row.addView(it, lp.apply { rightMargin = dp(8); bottomMargin = dp(8) })
+            val lp = if (fixed) LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40))
+                     else LinearLayout.LayoutParams(0, dp(40), 1f)
+            row.addView(it, lp.apply { rightMargin = dp(8) })
         }
         chipGroups.add(buttons to current)
         refreshChips()
@@ -295,8 +439,18 @@ class MainActivity : ComponentActivity() {
             val sel = current()
             buttons.forEachIndexed { i, b ->
                 val on = i == sel
-                b.setTextColor(if (on) Color.rgb(10, 20, 30) else textColor)
-                b.background = GradientDrawable().apply { cornerRadius = dp(10).toFloat(); setColor(if (on) accent else cardColor) }
+                b.setTextColor(if (on) onAccent else textColor)
+                b.background = rounded(if (on) accent else surface2, 11)
+            }
+        }
+    }
+
+    private fun refreshSwatches() {
+        swatchViews.forEach { (v, col) ->
+            val on = col == cfg.color
+            v.background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat(); setColor(col)
+                setStroke(dp(if (on) 3 else 1), if (on) accent else Color.argb(60, 255, 255, 255))
             }
         }
     }
@@ -304,14 +458,17 @@ class MainActivity : ComponentActivity() {
     private fun slider(root: LinearLayout, label: String, min: Int, max: Int, value: Int,
                        fmt: (Int) -> String, onChange: (Int) -> Unit): SeekBar {
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        head.addView(TextView(this).apply { text = label; setTextColor(textColor); textSize = 14f },
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        head.addView(TextView(this).apply { text = label; setTextColor(textColor); textSize = 14.5f },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         val out = TextView(this).apply { text = fmt(value.coerceIn(min, max)); setTextColor(mutedColor); textSize = 14f }
         head.addView(out)
-        root.addView(head, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
+        root.addView(head, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) })
         val bar = SeekBar(this).apply {
             this.max = max - min
             progress = (value - min).coerceIn(0, max - min)
+            progressTintList = ColorStateList.valueOf(accent)
+            thumbTintList = ColorStateList.valueOf(accent)
+            progressBackgroundTintList = ColorStateList.valueOf(Color.rgb(70, 70, 80))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
                     out.text = fmt(p + min); if (fromUser) onChange(p + min)
@@ -320,14 +477,21 @@ class MainActivity : ComponentActivity() {
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
         }
-        root.addView(bar)
+        root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36)))
         return bar
     }
 
-    private fun onClockChanged() { updateCoverage(); if (previewMesh == null || !cfg.parallax) renderPreview(false) }
-    private fun onEffectChanged() { prepareSmall(); updateCoverage(); startAnim() }
+    private fun setBusy(b: Boolean, msg: String? = null) {
+        busy = b
+        progress.visibility = if (b) View.VISIBLE else View.GONE
+        applyBtn.alpha = if (b) 0.5f else 1f
+        if (msg != null) status.text = msg
+    }
 
-    // ================= Fotos =================
+    private fun onClockChanged() { scheduleCoverage(); preview.invalidate() }
+    private fun onEffectChanged() { rebuildMeter(); scheduleCoverage(); preview.invalidate() }
+
+    // ================= Carregar o que já está aplicado =================
 
     private fun readScreenSize() {
         if (Build.VERSION.SDK_INT >= 30) {
@@ -338,59 +502,79 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun loadSaved() {
-        if (Store.mode(Store.prefs(this)) == Store.MODE_VIDEO && showVideoPreview(Store.videoDir(this))) {
-            status.text = "Vídeo atual carregado. Ajusta e aplica."
-            return
-        }
-        val bf = Store.bgFile(this); val ff = Store.fgFile(this)
-        if (bf.exists() && ff.exists()) {
-            bg = BitmapFactory.decodeFile(bf.path)
-            fg = BitmapFactory.decodeFile(ff.path)
-            Store.depthFile(this).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }?.let { db ->
-                val d = DepthEstimator.fromBitmap(db)
-                photoDepth = DepthEstimator.Result(db.width, db.height, d, 0)
-                previewMesh = DepthMesh.forPhoto(d, db.width, db.height, fg)
+    private val previewMaxSide get() = max(900, (resources.displayMetrics.heightPixels * 0.40f * 1.2f).toInt())
+
+    /** Lê os ficheiros numa thread de fundo — a app abre logo, sem bloquear. */
+    private fun loadSavedAsync() {
+        setBusy(true, "A carregar…")
+        Thread {
+            try {
+                if (Store.mode(Store.prefs(this)) == Store.MODE_VIDEO && loadVideoPreview(Store.videoDir(this))) {
+                    runOnUiThread { setBusy(false, "Vídeo atual carregado."); afterContentChanged() }
+                    return@Thread
+                }
+                val bf = Store.bgFile(this); val ff = Store.fgFile(this)
+                if (bf.exists() && ff.exists()) {
+                    val bg = BitmapFactory.decodeFile(bf.path)
+                    val fg = BitmapFactory.decodeFile(ff.path)
+                    val depth = Store.depthFile(this).takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.path) }?.let { db ->
+                        DepthEstimator.Result(db.width, db.height, DepthEstimator.fromBitmap(db), 0).also { db.recycle() }
+                    }
+                    val mesh = depth?.let { DepthMesh.forPhoto(it.d, it.w, it.h, fg) }
+                    val bgP = DepthRenderer.scaledDown(bg, previewMaxSide)
+                    val fgP = DepthRenderer.scaledDown(fg, previewMaxSide)
+                    runOnUiThread {
+                        bgFull = bg; fgFull = fg; photoDepth = depth
+                        bgPrev = bgP; fgPrev = fgP; maskPrev = null; avgMask = null; previewMesh = mesh
+                        pendingMode = Store.MODE_PHOTO
+                        setBusy(false, "Foto atual carregada.")
+                        afterContentChanged()
+                    }
+                } else {
+                    runOnUiThread { setBusy(false, "Escolhe uma foto ou um vídeo com um sujeito bem destacado.") }
+                }
+            } catch (e: Throwable) {
+                runOnUiThread { setBusy(false, "Não consegui carregar o fundo atual (${e.javaClass.simpleName}). Escolhe outra foto.") }
             }
-            prepareSmall()
-            status.text = "Foto atual carregada. Ajusta e aplica."
-            updateCoverage()
-            startAnim()
-        }
+        }.start()
     }
 
+    private fun afterContentChanged() {
+        rebuildMeter()
+        scheduleCoverage()
+        preview.invalidate()
+    }
+
+    // ================= Fotos =================
+
     private fun importPhoto(uri: Uri) {
-        busy = true
-        status.text = "A recortar o sujeito…"
+        setBusy(true, "A recortar o sujeito…")
         Thread {
             val bmp = try {
                 decodeLimited(uri, 2400).let {
                     if (it.config == Bitmap.Config.ARGB_8888) it else it.copy(Bitmap.Config.ARGB_8888, false)
                 }
-            } catch (e: Exception) { null }
-            runOnUiThread {
-                if (bmp == null) { busy = false; status.text = "Não consegui abrir a foto."; return@runOnUiThread }
-                segmenter.process(InputImage.fromBitmap(bmp, 0))
-                    .addOnSuccessListener { result ->
-                        val cut = result.foregroundBitmap
-                        if (cut == null) {
-                            busy = false
-                            status.text = "Não encontrei nenhum sujeito nesta foto. Tenta outra."
-                        } else {
-                            bg = bmp; fg = cut; mask = null; avgMask = null
-                            pendingMode = Store.MODE_PHOTO
-                            photoDepth = null; previewMesh = null
-                            prepareSmall()
-                            autoPosition()
-                            computePhotoDepth(bmp, cut)
-                        }
+            } catch (e: Throwable) { null }
+            if (bmp == null) { runOnUiThread { setBusy(false, "Não consegui abrir a foto.") }; return@Thread }
+            segmenter.process(InputImage.fromBitmap(bmp, 0))
+                .addOnSuccessListener { result ->
+                    val cut = result.foregroundBitmap
+                    if (cut == null) {
+                        setBusy(false, "Não encontrei nenhum sujeito nesta foto. Tenta outra.")
+                        return@addOnSuccessListener
                     }
-                    .addOnFailureListener { e ->
-                        busy = false
-                        status.text = "Falhou o recorte: ${e.message}\n" +
-                            "Se for a primeira vez, o modelo pode ainda estar a descarregar — tenta daqui a um minuto."
-                    }
-            }
+                    bgFull = bmp; fgFull = cut; photoDepth = null
+                    bgPrev = DepthRenderer.scaledDown(bmp, previewMaxSide)
+                    fgPrev = DepthRenderer.scaledDown(cut, previewMaxSide)
+                    maskPrev = null; avgMask = null; previewMesh = null
+                    pendingMode = Store.MODE_PHOTO
+                    rebuildMeter()
+                    autoPosition()
+                    computePhotoDepth(bmp, cut)
+                }
+                .addOnFailureListener { e ->
+                    setBusy(false, "Falhou o recorte: ${e.message}. Se for a primeira vez, o modelo pode ainda estar a descarregar.")
+                }
         }.start()
     }
 
@@ -402,15 +586,14 @@ class MainActivity : ComponentActivity() {
                 val r = DepthEstimator(this).use { it.estimate(photo) }
                 val mesh = DepthMesh.forPhoto(r.d, r.w, r.h, cut)
                 runOnUiThread { photoDepth = r; previewMesh = mesh }
-                "Profundidade 3D pronta (${r.ms} ms). Ajusta e aplica."
+                "Profundidade 3D pronta (${r.ms} ms)."
             } catch (e: Throwable) {
-                "Profundidade indisponível (${e.javaClass.simpleName}: ${e.message}). Vai usar 3 camadas."
+                "Profundidade indisponível (${e.javaClass.simpleName}). Vai usar 3 camadas."
             }
             runOnUiThread {
-                busy = false
                 depthMsg = msg
-                status.text = msg
-                startAnim()
+                setBusy(false, msg)
+                preview.invalidate()
             }
         }.start()
     }
@@ -428,153 +611,134 @@ class MainActivity : ComponentActivity() {
     // ================= Vídeo =================
 
     private fun importVideo(uri: Uri) {
-        busy = true
-        status.text = "A preparar o vídeo…"
+        setBusy(true, "A preparar o vídeo…")
         val out = Store.videoNewDir(this)
         Thread {
             try {
                 val r = VideoProcessor.process(this, uri, out) { done, total ->
                     runOnUiThread { status.text = "A recortar e medir a profundidade… $done/$total" }
                 }
+                val ok = loadVideoPreview(r.dir)
                 runOnUiThread {
-                    busy = false
-                    if (showVideoPreview(r.dir)) {
+                    if (ok) {
                         pendingMode = Store.MODE_VIDEO
-                        autoPosition()
                         depthMsg = r.depthMsg
-                        status.text = "Vídeo pronto: ${r.frames} frames a ${r.fps.roundToInt()} fps. ${r.depthMsg}"
-                    } else {
-                        status.text = "O vídeo foi processado mas não consegui abri-lo."
-                    }
+                        setBusy(false, "Vídeo pronto: ${r.frames} frames a ${r.fps.roundToInt()} fps. ${r.depthMsg}")
+                        afterContentChanged()
+                        autoPosition()
+                    } else setBusy(false, "O vídeo foi processado mas não consegui abri-lo.")
                 }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    busy = false
-                    status.text = "Falhou o vídeo: ${e.message}"
-                }
+            } catch (e: Throwable) {
+                runOnUiThread { setBusy(false, "Falhou o vídeo: ${e.message}") }
             }
         }.start()
     }
 
-    /** Pré-visualização com o 1.º frame do clipe (e a sua profundidade, se houver). */
-    private fun showVideoPreview(dir: File): Boolean {
+    /** Lê o 1.º frame do clipe (e a sua profundidade). Pode correr fora da thread principal. */
+    private fun loadVideoPreview(dir: File): Boolean {
         val clip = VideoClip.open(dir) ?: return false
-        if (!clip.load(0)) { clip.release(); return false }
-        bg = clip.currentFrame
-        mask = clip.mask
-        fg = null
-        avgMask = BitmapFactory.decodeFile(VideoClip.avgFile(dir).path)
-        previewMesh = if (clip.hasDepth) DepthMesh().also { clip.applyDepth(0, it) } else null
-        photoDepth = null
-        clip.release()
-        prepareSmall()
-        updateCoverage()
-        startAnim()
-        return true
+        try {
+            if (!clip.load(0)) return false
+            val frame = clip.currentFrame ?: return false
+            val bgP = DepthRenderer.scaledDown(frame.copy(Bitmap.Config.ARGB_8888, false), previewMaxSide)
+            val maskP = clip.mask.copy(Bitmap.Config.ALPHA_8, false)
+            val avg = BitmapFactory.decodeFile(VideoClip.avgFile(dir).path)
+            val mesh = if (clip.hasDepth) DepthMesh().also { clip.applyDepth(0, it) } else null
+            runOnUiThread {
+                bgFull = null; fgFull = null; photoDepth = null
+                bgPrev = bgP; fgPrev = null; maskPrev = maskP; avgMask = avg; previewMesh = mesh
+                pendingMode = Store.MODE_VIDEO
+            }
+            return true
+        } finally {
+            clip.release()
+        }
     }
 
-    // ================= Pré-visualização =================
+    // ================= Cobertura do relógio =================
 
-    private fun prepareSmall() {
-        val f = (if (mask != null) avgMask else fg) ?: return
-        val w = 270
+    private fun rebuildMeter() {
+        val f = (if (maskPrev != null) avgMask else fgPrev) ?: run { meter = null; return }
+        val w = 200
         val h = (w * screenH.toFloat() / screenW).toInt()
-        fgSmall = DepthRenderer.fgForScreen(f, w, h, DepthRenderer.zoomFor(cfg))
+        meter = CoverageMeter(DepthRenderer.fgForScreen(f, w, h, DepthRenderer.zoomFor(cfg)))
+    }
+
+    /** As barras disparam dezenas de vezes por segundo — mede só quando param. */
+    private fun scheduleCoverage() {
+        ui.removeCallbacks(coverageRunnable)
+        ui.postDelayed(coverageRunnable, 120)
+    }
+
+    private fun updateCoverageNow() {
+        val m = meter
+        if (m == null) { coverageText.text = ""; return }
+        if (cfg.front) { coverageText.text = "Relógio à frente do sujeito — sempre visível"; return }
+        val cov = m.coverage(cfg, Date(), is24)
+        val pct = (cov * 100).roundToInt()
+        coverageText.text = when {
+            cov < 0.05f -> "O sujeito quase não toca no relógio ($pct%)"
+            cov > 0.60f -> "O sujeito tapa $pct% — experimenta \"Relógio à frente\""
+            cov > 0.45f -> "O sujeito tapa $pct% — a hora fica difícil de ler"
+            else -> "O sujeito tapa $pct% do relógio · bom equilíbrio"
+        }
     }
 
     private fun autoPosition() {
-        val small = fgSmall ?: return
-        val y = DepthRenderer.autoY(small, cfg.copy(front = false), Date(), DateFormat.is24HourFormat(this))
+        val m = meter ?: return
+        val y = m.autoY(cfg.copy(front = false), Date(), is24)
         if (y != null) {
             cfg = cfg.copy(y = y)
             posBar.progress = ((y - 0.05f) / 0.6f * 100).roundToInt().coerceIn(0, 100)
         }
-        updateCoverage()
-        renderPreview(false)
+        scheduleCoverage()
+        preview.invalidate()
     }
 
     private fun autoColor() {
-        val b = bg ?: return
+        val b = bgPrev ?: return
         val p = Palette.from(b).maximumColorCount(16).generate()
         val col = p.lightVibrantSwatch?.rgb ?: p.vibrantSwatch?.rgb ?: p.lightMutedSwatch?.rgb ?: p.dominantSwatch?.rgb
-        if (col != null) { cfg = cfg.copy(color = col); onClockChanged() }
-    }
-
-    private fun updateCoverage() {
-        val small = fgSmall
-        if (small == null) { coverageText.text = ""; return }
-        if (cfg.front) { coverageText.text = "Relógio à frente do sujeito — sempre visível."; return }
-        val cov = DepthRenderer.coverage(small, cfg, Date(), DateFormat.is24HourFormat(this))
-        val pct = (cov * 100).roundToInt()
-        coverageText.text = when {
-            cov < 0.05f -> "O sujeito quase não toca no relógio ($pct%) — não há efeito."
-            cov > 0.60f -> "O sujeito tapa $pct% do relógio. Experimenta \"Relógio à frente do sujeito\"."
-            cov > 0.45f -> "O sujeito tapa $pct% do relógio — a hora fica difícil de ler."
-            else -> "O sujeito tapa $pct% do relógio. Bom equilíbrio."
-        }
-    }
-
-    private fun renderPreview(animated: Boolean) {
-        val w = screenW / 3
-        val h = screenH / 3
-        val out = previewBmp?.takeIf { it.width == w && it.height == h }
-            ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { previewBmp = it }
-        var tx = 0f; var ty = 0f
-        if (animated) {
-            val t = (SystemClock.uptimeMillis() - animStart) / 1000f
-            tx = 0.8f * sin(t * 1.1f)
-            ty = 0.35f * sin(t * 0.7f + 1.2f)
-        }
-        DepthRenderer.draw(
-            Canvas(out), bg, fg, cfg, showClock = true, now = Date(),
-            is24 = DateFormat.is24HourFormat(this), tiltX = tx, tiltY = ty,
-            mask = mask, depth = previewMesh
-        )
-        preview.setImageBitmap(out)
-        preview.invalidate()
+        if (col != null) { cfg = cfg.copy(color = col); onClockChanged(); refreshSwatches() }
     }
 
     // ================= Guardar e aplicar =================
 
     private fun saveAndApply() {
         if (busy) { status.text = "Espera que termine o processamento."; return }
-        if (pendingMode == Store.MODE_VIDEO || (mask != null && fg == null)) { saveVideoAndApply(); return }
-        val b = bg ?: return
-        val f = fg ?: return
+        if (pendingMode == Store.MODE_VIDEO) { saveVideoAndApply(); return }
+        val b = bgFull ?: run { status.text = "Escolhe primeiro uma foto ou um vídeo."; return }
+        val f = fgFull ?: return
         val depth = photoDepth
-        busy = true
-        status.text = "A guardar…"
+        setBusy(true, "A guardar…")
         Thread {
-            writeAtomic(Store.bgFile(this)) { b.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-            writeAtomic(Store.fgFile(this)) { f.compress(Bitmap.CompressFormat.PNG, 100, it) }
-            if (depth != null) {
-                val db = DepthEstimator.toBitmap(depth.d, depth.w, depth.h)
-                writeAtomic(Store.depthFile(this)) { db.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                db.recycle()
-                Store.bgFillFile(this).delete()
-            } else {
-                // Sem profundidade: plano B com o fundo preenchido (3 camadas)
-                Store.depthFile(this).delete()
-                try {
-                    val filled = BackgroundFill.fill(b, f)
-                    writeAtomic(Store.bgFillFile(this)) { filled.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-                    filled.recycle()
-                } catch (_: Throwable) { Store.bgFillFile(this).delete() }
-            }
-            val p = Store.prefs(this)
-            cfg.save(p)
-            p.edit().putString("mode", Store.MODE_PHOTO).putLong("version", System.currentTimeMillis()).apply()
-            runOnUiThread {
-                busy = false
-                status.text = "Guardado."
-                openWallpaperPicker()
+            try {
+                writeAtomic(Store.bgFile(this)) { b.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                writeAtomic(Store.fgFile(this)) { f.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                if (depth != null) {
+                    val db = DepthEstimator.toBitmap(depth.d, depth.w, depth.h)
+                    writeAtomic(Store.depthFile(this)) { db.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    db.recycle()
+                    Store.bgFillFile(this).delete()
+                } else {
+                    Store.depthFile(this).delete()
+                    try {
+                        val filled = BackgroundFill.fill(b, f)
+                        writeAtomic(Store.bgFillFile(this)) { filled.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                        filled.recycle()
+                    } catch (_: Throwable) { Store.bgFillFile(this).delete() }
+                }
+                // O vídeo deixou de estar em uso
+                Store.videoDir(this).deleteRecursively()
+                commit(Store.MODE_PHOTO)
+            } catch (e: Throwable) {
+                runOnUiThread { setBusy(false, "Não consegui guardar (${e.javaClass.simpleName}).") }
             }
         }.start()
     }
 
     private fun saveVideoAndApply() {
-        busy = true
-        status.text = "A guardar…"
+        setBusy(true, "A guardar…")
         Thread {
             val fresh = Store.videoNewDir(this)
             val live = Store.videoDir(this)
@@ -585,15 +749,18 @@ class MainActivity : ComponentActivity() {
                 fresh.renameTo(live)
                 old.deleteRecursively()
             }
-            val p = Store.prefs(this)
-            cfg.save(p)
-            p.edit().putString("mode", Store.MODE_VIDEO).putLong("version", System.currentTimeMillis()).apply()
-            runOnUiThread {
-                busy = false
-                status.text = "Guardado."
-                openWallpaperPicker()
-            }
+            commit(Store.MODE_VIDEO)
         }.start()
+    }
+
+    private fun commit(mode: String) {
+        val p = Store.prefs(this)
+        cfg.save(p)
+        p.edit().putString("mode", mode).putLong("version", System.currentTimeMillis()).apply()
+        runOnUiThread {
+            setBusy(false, "Guardado. $depthMsg")
+            openWallpaperPicker()
+        }
     }
 
     private fun writeAtomic(target: File, write: (FileOutputStream) -> Unit) {

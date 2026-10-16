@@ -5,8 +5,8 @@
 
     <application
         android:label="@string/app_name"
-        android:icon="@android:drawable/ic_menu_gallery"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.Profundo">
 
         <!-- Descarrega o modelo de recorte do ML Kit ao instalar -->
         <meta-data

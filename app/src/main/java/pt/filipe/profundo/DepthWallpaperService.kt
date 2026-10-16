@@ -91,6 +91,12 @@ class DepthWallpaperService : WallpaperService() {
         private val start = SystemClock.uptimeMillis()
         @Volatile private var locked = true
         @Volatile private var surfaceOk = false
+        private val painter = ClockPainter()
+        private var is24 = true
+        private var is24Checked = 0L
+
+        /** O efeito (sensor, animação) só corre se estiver visível — e no ecrã inicial só se não for "parado". */
+        private fun effectActive() = isVisible && (locked || isPreview || !cfg.homeStatic)
 
         // Paralaxe
         private val sensors = getSystemService(SensorManager::class.java)
@@ -106,7 +112,11 @@ class DepthWallpaperService : WallpaperService() {
         private val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 locked = keyguard?.isKeyguardLocked ?: true
-                if (isVisible) requestDraw()
+                render.post {
+                    updateSensor()
+                    restartLoops()
+                    if (isVisible) drawFrame()
+                }
             }
         }
 
@@ -129,7 +139,7 @@ class DepthWallpaperService : WallpaperService() {
         /** Foto com movimento automático: ~30 fps só enquanto visível. */
         private val photoLoop = object : Runnable {
             override fun run() {
-                if (!isVisible || clip != null || !animatePhoto()) return
+                if (!effectActive() || clip != null || !animatePhoto()) return
                 val t0 = SystemClock.uptimeMillis()
                 drawFrame()
                 render.postAtTime(this, t0 + 33)
@@ -191,14 +201,18 @@ class DepthWallpaperService : WallpaperService() {
             super.onSurfaceDestroyed(holder)
         }
 
+        private val prefsChanged = Runnable {
+            cfg = ClockConfig.load(prefs)
+            ensureLoaded()
+            updateSensor()
+            restartLoops()
+            if (isVisible) drawFrame()
+        }
+
+        /** Guardar as definições dispara uma notificação por chave — junta-as numa só. */
         override fun onSharedPreferenceChanged(p: SharedPreferences?, key: String?) {
-            render.post {
-                cfg = ClockConfig.load(prefs)
-                ensureLoaded()
-                updateSensor()
-                restartLoops()
-                if (isVisible) drawFrame()
-            }
+            render.removeCallbacks(prefsChanged)
+            render.postDelayed(prefsChanged, 60)
         }
 
         // ---------- thread de render ----------
@@ -217,8 +231,9 @@ class DepthWallpaperService : WallpaperService() {
             stopLoops()
             if (!isVisible) return
             when {
-                clip != null -> render.post(videoLoop)
-                animatePhoto() -> render.post(photoLoop)
+                clip != null && effectActive() -> render.post(videoLoop)
+                clip != null -> { if (clip?.load(frameIndex) == true) clip?.applyDepth(frameIndex, clipMesh) }
+                animatePhoto() && effectActive() -> render.post(photoLoop)
             }
         }
 
@@ -228,7 +243,7 @@ class DepthWallpaperService : WallpaperService() {
             stopLoops()
             if (!visible) return
             restartLoops()
-            if (clip == null && !animatePhoto()) drawFrame()
+            if (!(effectActive() && (clip != null || animatePhoto()))) drawFrame()
         }
 
         private fun ensureLoaded() {
@@ -258,21 +273,26 @@ class DepthWallpaperService : WallpaperService() {
             val canvas = try { holder.lockHardwareCanvas() } catch (_: Exception) { null } ?: return
             try {
                 // Movimento automático: um balanço lento somado à inclinação
-                var tx = tiltX; var ty = tiltY
-                if (cfg.parallax && cfg.autoMotion) {
+                val active = effectActive()
+                var tx = if (active) tiltX else 0f
+                var ty = if (active) tiltY else 0f
+                if (active && cfg.parallax && cfg.autoMotion) {
                     val t = (SystemClock.uptimeMillis() - start) / 1000f
                     tx += 0.45f * sin(t * 0.55f)
                     ty += 0.30f * sin(t * 0.37f + 1.3f)
                 }
                 val c = clip
+                val nowMs = System.currentTimeMillis()
+                if (nowMs - is24Checked > 60_000L) { is24 = DateFormat.is24HourFormat(ctx); is24Checked = nowMs }
                 DepthRenderer.draw(
                     canvas,
                     bg = if (c != null) c.currentFrame else bg,
                     fg = if (c != null) null else fg,
                     cfg = cfg,
-                    showClock = locked || cfg.showOnHome,
-                    now = Date(),
-                    is24 = DateFormat.is24HourFormat(ctx),
+                    painter = painter,
+                    showClock = locked || cfg.showOnHome || isPreview,
+                    now = Date(nowMs),
+                    is24 = is24,
                     tiltX = tx.coerceIn(-1f, 1f), tiltY = ty.coerceIn(-1f, 1f),
                     mask = c?.mask,
                     bgFill = if (c != null) null else bgFill,
@@ -287,7 +307,7 @@ class DepthWallpaperService : WallpaperService() {
         // ---------- paralaxe ----------
 
         private fun updateSensor() {
-            val want = isVisible && cfg.parallax && tiltSensor != null
+            val want = effectActive() && cfg.parallax && tiltSensor != null
             if (want && !listening) {
                 hasBase = false
                 listening = sensors!!.registerListener(this, tiltSensor, SensorManager.SENSOR_DELAY_GAME, render)
@@ -314,7 +334,7 @@ class DepthWallpaperService : WallpaperService() {
             tiltX += (targetX - tiltX) * 0.2f
             tiltY += (targetY - tiltY) * 0.2f
             // Com loops ativos (vídeo / movimento automático) o próprio loop redesenha
-            if (clip == null && !animatePhoto() &&
+            if (clip == null && !animatePhoto() && effectActive() &&
                 (abs(tiltX - drawnX) > 0.01f || abs(tiltY - drawnY) > 0.01f)) drawFrame()
         }
 
